@@ -5,9 +5,7 @@
       <div class="px-4 sm:px-6 py-3 sm:py-4 border-b flex justify-between items-center" :class="darkMode ? 'border-gray-700' : 'border-gray-200'">
         <h3 class="text-base sm:text-lg font-medium" :class="darkMode ? 'text-white' : 'text-gray-900'">文件详情</h3>
         <button @click="$emit('close')" class="text-gray-400 hover:text-gray-500">
-          <svg class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-          </svg>
+          <IconClose class="h-6 w-6" />
         </button>
       </div>
 
@@ -126,6 +124,7 @@
 
 <script setup>
 import { defineProps, defineEmits, computed } from "vue";
+import { IconClose } from "@/components/icons";
 
 const props = defineProps({
   file: {
@@ -189,8 +188,14 @@ const expiresClass = computed(() => {
  * 计算剩余访问次数
  */
 const getRemainingViews = computed(() => {
-  const result = getRemainingViewsUtil(props.file); // 不传t函数，使用中文
-  return typeof result === "number" ? `${result} 次` : result;
+  const remaining = getRemainingViewsUtil(props.file);
+  if (remaining === Infinity) {
+    return "无限制";
+  }
+  if (remaining === 0) {
+    return "已用完";
+  }
+  return `${remaining} 次`;
 });
 
 /**
@@ -208,7 +213,7 @@ const remainingViewsClass = computed(() => {
     return "text-red-500";
   }
 
-  if (remaining < 3) {
+  if (remaining < 10) {
     return "text-orange-500";
   }
 

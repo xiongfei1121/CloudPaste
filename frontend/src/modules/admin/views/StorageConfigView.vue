@@ -1,19 +1,36 @@
 <script setup>
 import { onMounted, computed, ref, watch } from "vue";
+import { useI18n } from "vue-i18n";
 import { useStorageConfigManagement } from "@/modules/admin/storage/useStorageConfigManagement.js";
 import ConfigForm from "@/modules/admin/components/ConfigForm.vue";
 import CommonPagination from "@/components/common/CommonPagination.vue";
+import ConfirmDialog from "@/components/common/dialogs/ConfirmDialog.vue";
 import { formatDateTimeWithSeconds } from "@/utils/timeUtils.js";
+import { useThemeMode } from "@/composables/core/useThemeMode.js";
+import { useConfirmDialog } from "@/composables/core/useConfirmDialog.js";
+import { useStorageTypePresentation } from "@/modules/admin/storage/useStorageTypePresentation.js";
+import IconBase from "@/components/icons/IconBase.vue";
+import { IconArchive, IconCalendar, IconCheck, IconCheckCircle, IconChevronRight, IconClose, IconCloud, IconDelete, IconError, IconFolderPlus, IconLink, IconRefresh, IconRename, IconXCircle } from "@/components/icons";
 
-// 接收darkMode属性
-const props = defineProps({
-  darkMode: {
-    type: Boolean,
-    required: true,
-  },
-});
+const { isDarkMode: darkMode } = useThemeMode();
 
-// 使用存储配置管理 composable
+// 国际化
+const { t } = useI18n();
+
+// 确认对话框
+const { dialogState, confirm, handleConfirm, handleCancel } = useConfirmDialog();
+
+// 创建适配确认函数，用于传递给 composable
+const confirmFn = async ({ title, message, confirmType }) => {
+  return await confirm({
+    title,
+    message,
+    confirmType,
+    confirmText: t("common.dialogs.deleteButton"),
+    darkMode: darkMode.value,
+  });
+};
+
 const {
   // 状态
   loading,
@@ -45,18 +62,71 @@ const {
   showTestDetailsModal,
   getProviderIcon,
   STORAGE_TYPE_UNKNOWN,
-} = useStorageConfigManagement();
+} = useStorageConfigManagement({ confirmFn });
+
+// 存储类型展示/样式 helper（统一从 /api/storage-types 加载）
+const { storageTypesMeta, getTypeMeta, getTypeLabel, getBadgeClass, ensureLoaded } = useStorageTypePresentation();
 
 const formatStorageTypeLabel = (type) => {
-  if (!type || type === STORAGE_TYPE_UNKNOWN) {
-    return "未指定类型";
+  return getTypeLabel(type === STORAGE_TYPE_UNKNOWN ? null : type, t);
+};
+
+const getConfigSummaryRows = (config) => {
+  if (!config) return [];
+  const meta = getTypeMeta(config.storage_type);
+  const schema = meta?.configSchema;
+  const layout = schema?.layout;
+  const summaryFields = layout?.summaryFields;
+  if (!schema || !Array.isArray(summaryFields) || summaryFields.length === 0) {
+    return [];
   }
-  const map = {
-    S3: "S3 / 对象存储",
-    WEBDAV: "WebDAV",
-    LOCAL: "本地存储",
-  };
-  return map[type] || type;
+
+  return summaryFields
+    .map((fieldName) => {
+      const fieldMeta = schema.fields?.find((f) => f.name === fieldName) || null;
+      const labelKey = fieldMeta?.labelKey;
+      const label = labelKey ? t(labelKey) : fieldName;
+
+      let rawValue = config[fieldName];
+      let value = rawValue;
+      const ui = fieldMeta?.ui;
+
+      // 布尔类型：优先使用 displayOptions 翻译键（兼容数字0/1）
+      const isBooleanField = fieldMeta?.type === "boolean" || typeof rawValue === "boolean";
+      if (isBooleanField) {
+        const boolValue = rawValue === true || rawValue === 1 || rawValue === "1";
+        const displayOpts = ui?.displayOptions;
+        if (displayOpts) {
+          value = boolValue ? t(displayOpts.trueKey) : t(displayOpts.falseKey);
+        } else {
+          value = boolValue ? "是" : "否";
+        }
+      }
+
+      // 计算字段的 displayOptions 处理
+      if (fieldMeta?.type === "computed" && ui?.displayOptions) {
+        const displayKey = ui.displayOptions[rawValue];
+        if (displayKey) {
+          value = t(displayKey);
+        }
+      }
+
+      // 空值处理：使用 emptyTextKey 作为默认显示
+      const isEmpty = value === undefined || value === null || String(value).trim().length === 0;
+      if (isEmpty && ui?.emptyTextKey) {
+        value = t(ui.emptyTextKey);
+      }
+
+      const show = !isEmpty || !!ui?.emptyTextKey;
+
+      return {
+        key: fieldName,
+        label,
+        value,
+        show,
+      };
+    })
+    .filter((row) => row.show);
 };
 
 const storageTypeOptions = computed(() =>
@@ -109,9 +179,10 @@ const formatDate = (isoDate) => {
   return formatDateTimeWithSeconds(isoDate);
 };
 
-// 组件加载时获取列表
-onMounted(() => {
-  loadStorageConfigs();
+// 组件加载时获取存储类型元数据和配置列表
+onMounted(async () => {
+  await ensureLoaded();
+  await loadStorageConfigs();
 });
 </script>
 
@@ -121,9 +192,7 @@ onMounted(() => {
 
     <div class="flex flex-wrap gap-3 mb-5 items-center">
       <button @click="addNewConfig" class="px-3 py-2 rounded-md flex items-center space-x-1 bg-primary-500 hover:bg-primary-600 text-white font-medium transition text-sm">
-        <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
-        </svg>
+        <IconFolderPlus class="h-4 w-4" />
         <span>添加新配置</span>
       </button>
 
@@ -132,14 +201,7 @@ onMounted(() => {
         class="px-3 py-2 rounded-md flex items-center space-x-1 font-medium transition text-sm"
         :class="darkMode ? 'bg-gray-700 hover:bg-gray-600 text-gray-200' : 'bg-gray-200 hover:bg-gray-300 text-gray-700'"
       >
-        <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            stroke-width="2"
-            d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
-          />
-        </svg>
+        <IconRefresh class="h-4 w-4" />
         <span>刷新列表</span>
       </button>
 
@@ -166,18 +228,14 @@ onMounted(() => {
     <div v-if="error" class="mb-4 p-3 rounded-md text-sm" :class="darkMode ? 'bg-red-900/40 border border-red-800 text-red-200' : 'bg-red-50 text-red-800 border border-red-200'">
       <div class="flex justify-between items-start">
         <div class="flex items-start">
-          <svg class="h-5 w-5 text-red-400 mr-2 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-          </svg>
+          <IconError class="h-5 w-5 text-red-400 mr-2 mt-0.5 flex-shrink-0" />
           <div>
             <div class="font-medium">操作失败</div>
             <div class="mt-1">{{ error }}</div>
           </div>
         </div>
         <button @click="error = ''" class="text-red-400 hover:text-red-500" :class="darkMode ? 'hover:text-red-300' : 'hover:text-red-600'">
-          <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-          </svg>
+          <IconClose class="h-5 w-5" />
         </button>
       </div>
     </div>
@@ -186,17 +244,14 @@ onMounted(() => {
     <div class="flex-1 flex flex-col">
       <!-- 加载状态 -->
       <div v-if="loading" class="flex justify-center items-center h-40">
-        <svg class="animate-spin h-8 w-8 text-primary-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-        </svg>
+        <IconRefresh class="animate-spin h-8 w-8 text-primary-500" />
       </div>
 
       <!-- 存储配置列表 -->
       <template v-else-if="hasAnyConfig">
         <!-- 有筛选结果时显示配置列表 -->
-        <div v-if="hasFilteredResult" class="bg-white dark:bg-gray-800 shadow-md rounded-lg p-3">
-          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 gap-4">
+        <div v-if="hasFilteredResult" class="bg-white dark:bg-gray-800 shadow-md rounded-lg p-0 sm:p-3">
+          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 gap-3 sm:gap-4">
             <div
               v-for="config in filteredConfigs"
               :key="config.id"
@@ -206,70 +261,85 @@ onMounted(() => {
                 config.is_default ? (darkMode ? 'ring-3 ring-primary-500 border-primary-500 shadow-lg' : 'ring-3 ring-primary-500 border-primary-500 shadow-lg') : '',
               ]"
             >
-              <div class="px-4 py-3 flex justify-between items-center border-b" :class="darkMode ? 'bg-gray-700 border-gray-600' : 'bg-gray-50 border-gray-200'">
-                <div class="flex items-center">
-                  <svg class="h-5 w-5 mr-2 text-primary-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" :d="getProviderIcon(config.provider_type)" />
-                  </svg>
+              <div class="px-2 py-2 sm:px-3 sm:py-2.5 flex flex-wrap justify-between items-center gap-2 border-b" :class="darkMode ? 'bg-gray-700 border-gray-600' : 'bg-gray-50 border-gray-200'">
+                <div class="flex items-center gap-1 sm:gap-2 flex-wrap min-w-0">
+                  <IconBase :class="['h-4 w-4 sm:h-5 sm:w-5 flex-shrink-0', getProviderIcon(config.storage_type, config.provider_type).color]">
+                    <path
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="2"
+                      :d="getProviderIcon(config.storage_type, config.provider_type).path"
+                    />
+                  </IconBase>
                   <h3 class="font-medium text-sm" :class="[darkMode ? 'text-gray-100' : 'text-gray-900', config.is_default ? 'font-semibold' : '']">
                     {{ config.name }}
                   </h3>
                   <span
                     v-if="config.is_default"
-                    class="ml-2 text-xs px-2 py-0.5 rounded-full font-medium"
+                    class="text-xs px-1.5 sm:px-2 py-0.5 rounded-full font-medium flex-shrink-0"
                     :class="darkMode ? 'bg-primary-600 text-white' : 'bg-primary-500 text-white'"
                   >
                     默认
                   </span>
-                </div>
-                <div class="flex items-center gap-2">
-                  <span class="text-xs px-2 py-1 rounded-full font-medium" :class="darkMode ? 'bg-primary-900/40 text-primary-200' : 'bg-primary-100 text-primary-800'">
-                    {{ config.provider_type || '未指定' }}
+                  <span
+                    v-if="config.url_proxy"
+                    class="text-xs px-1.5 sm:px-2 py-0.5 rounded-full font-medium flex items-center gap-0.5 sm:gap-1 flex-shrink-0"
+                    :class="darkMode ? 'bg-blue-600/20 text-blue-300 border border-blue-500/30' : 'bg-blue-100 text-blue-700 border border-blue-200'"
+                    :title="`代理URL: ${config.url_proxy}`"
+                  >
+                    <IconLink class="h-3 w-3" />
+                    <span class="hidden sm:inline">代理</span>
                   </span>
-                  <span class="text-xs px-2 py-1 rounded-full font-medium" :class="darkMode ? 'bg-gray-800 text-gray-200 border border-gray-600' : 'bg-gray-100 text-gray-700 border border-gray-200'">
+                </div>
+                <div class="flex items-center gap-1 sm:gap-2 flex-wrap flex-shrink-0">
+                  <span
+                    v-if="config.provider_type"
+                    class="text-xs px-1.5 sm:px-2 py-0.5 sm:py-1 rounded-full font-medium whitespace-nowrap"
+                    :class="darkMode ? 'bg-primary-900/40 text-primary-200' : 'bg-primary-100 text-primary-800'"
+                  >
+                    {{ config.provider_type }}
+                  </span>
+                  <span
+                    class="text-xs px-1.5 sm:px-2 py-0.5 sm:py-1 rounded-full font-medium whitespace-nowrap"
+                    :class="getBadgeClass(config.storage_type, darkMode)"
+                  >
                     {{ formatStorageTypeLabel(config.storage_type) }}
                   </span>
                 </div>
               </div>
 
-              <div class="p-4">
+              <div class="p-3 sm:p-4">
                 <div :class="darkMode ? 'text-gray-300' : 'text-gray-600'">
-                  <div class="grid grid-cols-1 gap-2 text-sm">
-                    <div class="flex justify-between">
-                      <span class="font-medium">存储桶:</span>
-                      <span>{{ config.bucket_name }}</span>
+                  <!-- 类型特定字段：使用策略生成摘要 -->
+                  <div v-if="getConfigSummaryRows(config).length" class="grid grid-cols-1 gap-2 text-sm">
+                    <div
+                      v-for="row in getConfigSummaryRows(config)"
+                      :key="row.key"
+                      class="flex justify-between"
+                    >
+                      <span class="font-medium">{{ row.label }}:</span>
+                      <span
+                        v-if="row.key === 'endpoint_url'"
+                        class="truncate ml-2 max-w-[60%] text-right"
+                        :title="row.value"
+                      >
+                        {{ row.value }}
+                      </span>
+                      <span v-else>{{ row.value }}</span>
                     </div>
+                  </div>
 
-                    <div class="flex justify-between">
-                      <span class="font-medium">区域:</span>
-                      <span>{{ config.region || "自动" }}</span>
-                    </div>
-
-                    <div class="flex justify-between" v-if="config.default_folder">
-                      <span class="font-medium">默认文件夹:</span>
-                      <span>{{ config.default_folder || "根目录" }}</span>
-                    </div>
-
-                    <div class="flex justify-between" v-if="config.path_style !== undefined">
-                      <span class="font-medium">路径样式:</span>
-                      <span>{{ config.path_style ? "路径样式" : "虚拟主机样式" }}</span>
-                    </div>
+                  <!-- 通用字段 -->
+                  <div
+                    class="grid grid-cols-1 gap-2 text-sm mt-2 pt-2 border-t"
+                    :class="darkMode ? 'border-gray-600' : 'border-gray-200'"
+                  >
 
                     <div class="flex justify-between">
                       <span class="font-medium">API密钥可见:</span>
                       <span class="flex items-center">
-                        <svg class="h-4 w-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor" :class="config.is_public ? 'text-green-500' : 'text-gray-400'">
-                          <path
-                            stroke-linecap="round"
-                            stroke-linejoin="round"
-                            stroke-width="2"
-                            :d="
-                              config.is_public
-                                ? 'M9 12l2 2 4-4M7.835 4.697a3.42 3.42 0 001.946-.806 3.42 3.42 0 014.438 0 3.42 3.42 0 001.946.806 3.42 3.42 0 013.138 3.138 3.42 3.42 0 00.806 1.946 3.42 3.42 0 010 4.438 3.42 3.42 0 00-.806 1.946 3.42 3.42 0 01-3.138 3.138 3.42 3.42 0 00-1.946.806 3.42 3.42 0 01-4.438 0 3.42 3.42 0 00-1.946-.806 3.42 3.42 0 01-3.138-3.138 3.42 3.42 0 00-.806-1.946 3.42 3.42 0 010-4.438 3.42 3.42 0 00.806-1.946 3.42 3.42 0 013.138-3.138z'
-                                : 'M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636'
-                            "
-                          />
-                        </svg>
+                        <IconCheckCircle v-if="config.is_public" class="h-4 w-4 mr-1 text-green-500" />
+                        <IconXCircle v-else class="h-4 w-4 mr-1 text-gray-400" />
                         {{ config.is_public ? "允许" : "禁止" }}
                       </span>
                     </div>
@@ -314,9 +384,7 @@ onMounted(() => {
                     class="flex items-center px-3 py-1.5 rounded text-sm font-medium transition"
                     :class="darkMode ? 'bg-primary-600 hover:bg-primary-700 text-white' : 'bg-primary-100 hover:bg-primary-200 text-primary-800'"
                   >
-                    <svg class="h-4 w-4 mr-1.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-                    </svg>
+                    <IconCheck class="h-4 w-4 mr-1.5" />
                     设为默认
                   </button>
 
@@ -333,25 +401,11 @@ onMounted(() => {
                     :disabled="testResults[config.id]?.loading"
                   >
                     <template v-if="testResults[config.id]?.loading">
-                      <svg class="animate-spin h-4 w-4 mr-1.5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                        <path
-                          class="opacity-75"
-                          fill="currentColor"
-                          d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-                        ></path>
-                      </svg>
+                      <IconRefresh class="animate-spin h-4 w-4 mr-1.5" />
                       测试中...
                     </template>
                     <template v-else>
-                      <svg class="h-4 w-4 mr-1.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path
-                          stroke-linecap="round"
-                          stroke-linejoin="round"
-                          stroke-width="2"
-                          d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"
-                        />
-                      </svg>
+                      <IconCalendar class="h-4 w-4 mr-1.5" />
                       测试连接
                     </template>
                   </button>
@@ -361,14 +415,7 @@ onMounted(() => {
                     class="flex items-center px-3 py-1.5 rounded text-sm font-medium transition"
                     :class="darkMode ? 'bg-gray-600 hover:bg-gray-700 text-white' : 'bg-gray-100 hover:bg-gray-200 text-gray-800'"
                   >
-                    <svg class="h-4 w-4 mr-1.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path
-                        stroke-linecap="round"
-                        stroke-linejoin="round"
-                        stroke-width="2"
-                        d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"
-                      />
-                    </svg>
+                    <IconRename class="h-4 w-4 mr-1.5" />
                     编辑
                   </button>
 
@@ -377,14 +424,7 @@ onMounted(() => {
                     class="flex items-center px-3 py-1.5 rounded text-sm font-medium transition"
                     :class="darkMode ? 'bg-red-600 hover:bg-red-700 text-white' : 'bg-red-100 hover:bg-red-200 text-red-800'"
                   >
-                    <svg class="h-4 w-4 mr-1.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path
-                        stroke-linecap="round"
-                        stroke-linejoin="round"
-                        stroke-width="2"
-                        d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
-                      />
-                    </svg>
+                    <IconDelete class="h-4 w-4 mr-1.5" />
                     删除
                   </button>
                 </div>
@@ -417,15 +457,11 @@ onMounted(() => {
         class="rounded-lg p-6 text-center transition-colors duration-200 flex-1 flex flex-col justify-center items-center bg-white dark:bg-gray-800 shadow-md"
         :class="darkMode ? 'text-gray-300' : 'text-gray-600'"
       >
-        <svg class="mx-auto h-16 w-16 mb-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 10-9.78 2.096A4.001 4.001 0 003 15z" />
-        </svg>
+        <IconCloud class="mx-auto h-16 w-16 mb-4 text-gray-400" />
         <h3 class="text-lg font-medium mb-2" :class="darkMode ? 'text-gray-200' : 'text-gray-700'">尚未配置任何存储</h3>
         <p class="mb-5 text-sm max-w-md">添加您的第一个存储配置，支持多种对象存储或 WebDAV 服务。</p>
         <button @click="addNewConfig" class="px-4 py-2 rounded-md bg-primary-500 hover:bg-primary-600 text-white font-medium transition inline-flex items-center">
-          <svg class="h-5 w-5 mr-1.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
-          </svg>
+          <IconFolderPlus class="h-5 w-5 mr-1.5" />
           添加配置
         </button>
       </div>
@@ -454,13 +490,7 @@ onMounted(() => {
         <div class="p-3 sm:p-4 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center">
           <h3 class="text-base sm:text-lg font-medium text-gray-900 dark:text-white">存储连接测试结果</h3>
           <button @click="showTestDetails = false" class="text-gray-400 hover:text-gray-500">
-            <svg class="h-5 w-5" fill="currentColor" viewBox="0 0 20 20">
-              <path
-                fill-rule="evenodd"
-                d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z"
-                clip-rule="evenodd"
-              ></path>
-            </svg>
+            <IconClose class="h-5 w-5" />
           </button>
         </div>
 
@@ -499,29 +529,69 @@ onMounted(() => {
               @click="showDetailedResults = !showDetailedResults"
               class="text-sm flex items-center text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200"
             >
-              <svg class="h-4 w-4 mr-1 transition-transform duration-200" :class="showDetailedResults ? 'rotate-90' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
-              </svg>
+              <IconChevronRight class="h-4 w-4 mr-1 transition-transform duration-200" :class="showDetailedResults ? 'rotate-90' : ''" />
               {{ showDetailedResults ? "隐藏详细结果" : "显示详细结果" }}
             </button>
           </div>
 
           <div v-if="showDetailedResults" class="space-y-4">
-            <!-- 测试说明 -->
-            <div class="mb-3 p-2 rounded bg-blue-50 dark:bg-blue-900/30 text-blue-800 dark:text-blue-300 text-xs">
-              <div class="flex items-start">
-                <svg class="h-4 w-4 mr-1 mt-0.5 flex-shrink-0 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-                <div>S3 存储测试，最终请以实际上传结果为准</div>
+            <!-- 连接信息 - OneDrive（基于 result.info） -->
+            <div
+              class="mb-3"
+              v-if="
+                selectedTestResult.result?.info &&
+                (selectedTestResult.result.info.driveName || selectedTestResult.result.info.driveType)
+              "
+            >
+              <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">连接信息</h4>
+              <div class="bg-gray-50 dark:bg-gray-900/50 rounded p-2 sm:p-3 text-xs sm:text-sm">
+                <div class="space-y-2">
+                  <div class="connection-info-item" v-if="selectedTestResult.result.info.region">
+                    <div class="text-gray-500 dark:text-gray-400 font-medium mb-0.5">区域:</div>
+                    <div class="pl-2 text-gray-900 dark:text-gray-200">{{ selectedTestResult.result.info.region }}</div>
+                  </div>
+                  <div class="connection-info-item" v-if="selectedTestResult.result.info.driveName">
+                    <div class="text-gray-500 dark:text-gray-400 font-medium mb-0.5">驱动器名称:</div>
+                    <div class="pl-2 text-gray-900 dark:text-gray-200">{{ selectedTestResult.result.info.driveName }}</div>
+                  </div>
+                  <div class="connection-info-item" v-if="selectedTestResult.result.info.defaultFolder">
+                    <div class="text-gray-500 dark:text-gray-400 font-medium mb-0.5">默认上传目录:</div>
+                    <div class="pl-2 text-gray-900 dark:text-gray-200">{{ selectedTestResult.result.info.defaultFolder }}</div>
+                  </div>
+                  <div class="connection-info-item" v-if="selectedTestResult.result.info.quota">
+                    <div class="text-gray-500 dark:text-gray-400 font-medium mb-0.5">存储配额:</div>
+                    <div class="pl-2 text-gray-900 dark:text-gray-200">
+                      <span v-if="selectedTestResult.result.info.quota.used !== null">
+                        已用: {{ (selectedTestResult.result.info.quota.used / 1024 / 1024 / 1024).toFixed(2) }} GB
+                      </span>
+                      <span
+                        v-if="
+                          selectedTestResult.result.info.quota.used !== null &&
+                          selectedTestResult.result.info.quota.total !== null
+                        "
+                      >
+                        /
+                      </span>
+                      <span v-if="selectedTestResult.result.info.quota.total !== null">
+                        总计: {{ (selectedTestResult.result.info.quota.total / 1024 / 1024 / 1024).toFixed(2) }} GB
+                      </span>
+                    </div>
+                  </div>
+                  <div class="connection-info-item" v-if="selectedTestResult.result.info.responseTime">
+                    <div class="text-gray-500 dark:text-gray-400 font-medium mb-0.5">响应时间:</div>
+                    <div class="pl-2 text-gray-900 dark:text-gray-200">
+                      {{ selectedTestResult.result.info.responseTime }}
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
 
-            <!-- 连接信息 -->
-            <div class="mb-3">
+            <!-- 连接信息 - S3 -->
+            <div class="mb-3" v-if="selectedTestResult.result?.connectionInfo">
               <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">连接信息</h4>
               <div class="bg-gray-50 dark:bg-gray-900/50 rounded p-2 sm:p-3 text-xs sm:text-sm">
-                <div v-if="selectedTestResult.result?.connectionInfo" class="space-y-2">
+                <div class="space-y-2">
                   <div v-for="(value, key) in selectedTestResult.result.connectionInfo" :key="key" class="connection-info-item">
                     <div class="text-gray-500 dark:text-gray-400 font-medium mb-0.5">{{ formatLabel(key) }}:</div>
                     <div
@@ -535,20 +605,90 @@ onMounted(() => {
               </div>
             </div>
 
+            <!-- 连接信息 - WebDAV（info 存在且非 OneDrive/S3 CORS 测试形态） -->
+            <div
+              class="mb-3"
+              v-if="
+                selectedTestResult.result?.info &&
+                !selectedTestResult.result?.connectionInfo &&
+                !selectedTestResult.result?.cors &&
+                !selectedTestResult.result.info.driveName &&
+                !selectedTestResult.result.info.driveType
+              "
+            >
+              <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">连接信息</h4>
+              <div class="bg-gray-50 dark:bg-gray-900/50 rounded p-2 sm:p-3 text-xs sm:text-sm">
+                <div class="space-y-2">
+                  <div class="connection-info-item">
+                    <div class="text-gray-500 dark:text-gray-400 font-medium mb-0.5">端点地址:</div>
+                    <div class="pl-2 text-gray-900 dark:text-gray-200 break-all overflow-wrap-anywhere endpoint-url">
+                      {{ selectedTestResult.result.info.endpoint || "未设置" }}
+                    </div>
+                  </div>
+
+                  <div class="connection-info-item" v-if="selectedTestResult.result.info.defaultFolder">
+                    <div class="text-gray-500 dark:text-gray-400 font-medium mb-0.5">默认目录:</div>
+                    <div class="pl-2 text-gray-900 dark:text-gray-200">
+                      {{ selectedTestResult.result.info.defaultFolder || "/" }}
+                    </div>
+                  </div>
+
+                  <div class="connection-info-item" v-if="selectedTestResult.result.info.davCompliance">
+                    <div class="text-gray-500 dark:text-gray-400 font-medium mb-0.5">DAV协议支持:</div>
+                    <div class="pl-2 text-gray-900 dark:text-gray-200">
+                      <template v-if="selectedTestResult.result.info.davCompliance.compliance">
+                        {{ selectedTestResult.result.info.davCompliance.compliance.join(", ") }}
+                        <span v-if="selectedTestResult.result.info.davCompliance.server" class="text-gray-500 dark:text-gray-400 ml-1">
+                          ({{ selectedTestResult.result.info.davCompliance.server }})
+                        </span>
+                      </template>
+                      <template v-else-if="Array.isArray(selectedTestResult.result.info.davCompliance)">
+                        {{ selectedTestResult.result.info.davCompliance.join(", ") }}
+                      </template>
+                      <template v-else>
+                        {{ String(selectedTestResult.result.info.davCompliance) }}
+                      </template>
+                    </div>
+                  </div>
+
+                  <div class="connection-info-item" v-if="selectedTestResult.result.info.quota && (selectedTestResult.result.info.quota.used !== null || selectedTestResult.result.info.quota.available !== null)">
+                    <div class="text-gray-500 dark:text-gray-400 font-medium mb-0.5">存储配额:</div>
+                    <div class="pl-2 text-gray-900 dark:text-gray-200">
+                      <span v-if="selectedTestResult.result.info.quota.used !== null">
+                        已用: {{ (selectedTestResult.result.info.quota.used / 1024 / 1024).toFixed(2) }} MB
+                      </span>
+                      <span v-if="selectedTestResult.result.info.quota.used !== null && selectedTestResult.result.info.quota.available !== null"> / </span>
+                      <span v-if="selectedTestResult.result.info.quota.available !== null">
+                        可用: {{ (selectedTestResult.result.info.quota.available / 1024 / 1024).toFixed(2) }} MB
+                      </span>
+                    </div>
+                  </div>
+
+                  <div class="connection-info-item" v-if="selectedTestResult.result.info.tlsSkipVerify">
+                    <div class="text-gray-500 dark:text-gray-400 font-medium mb-0.5">TLS证书验证:</div>
+                    <div class="pl-2 text-yellow-600 dark:text-yellow-400">
+                      已跳过（不安全）
+                    </div>
+                  </div>
+
+                  <div class="connection-info-item" v-if="selectedTestResult.result.info.customHost">
+                    <div class="text-gray-500 dark:text-gray-400 font-medium mb-0.5">自定义Host:</div>
+                    <div class="pl-2 text-gray-900 dark:text-gray-200">
+                      {{ selectedTestResult.result.info.customHost }}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
             <!-- 读取权限测试 -->
             <div class="mb-3" v-if="selectedTestResult.result?.read">
               <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">读取权限测试</h4>
               <div class="bg-gray-50 dark:bg-gray-900/50 rounded p-2 sm:p-3 text-xs sm:text-sm">
                 <div class="flex items-center mb-1">
                   <span class="mr-1" :class="selectedTestResult.result?.read?.success ? 'text-green-500' : 'text-red-500'">
-                    <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path
-                        stroke-linecap="round"
-                        stroke-linejoin="round"
-                        stroke-width="2"
-                        :d="selectedTestResult.result?.read?.success ? 'M5 13l4 4L19 7' : 'M6 18L18 6M6 6l12 12'"
-                      ></path>
-                    </svg>
+                    <IconCheck v-if="selectedTestResult.result?.read?.success" class="h-4 w-4" />
+                    <IconClose v-else class="h-4 w-4" />
                   </span>
                   <span :class="selectedTestResult.result?.read?.success ? 'text-green-700 dark:text-green-400' : 'text-red-700 dark:text-red-400'">
                     {{ selectedTestResult.result?.read?.success ? "读取权限测试成功" : "读取权限测试失败" }}
@@ -557,9 +697,7 @@ onMounted(() => {
 
                 <!-- 添加测试说明 -->
                 <div v-if="selectedTestResult.result?.read?.note" class="mb-2 pl-5 text-amber-600 dark:text-amber-400 text-xs italic">
-                  <svg class="h-3 w-3 inline-block mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                  </svg>
+                  <IconError class="h-3 w-3 inline-block mr-1" />
                   {{ selectedTestResult.result.read.note }}
                 </div>
 
@@ -604,14 +742,8 @@ onMounted(() => {
               <div class="bg-gray-50 dark:bg-gray-900/50 rounded p-2 sm:p-3 text-xs sm:text-sm">
                 <div class="flex items-center mb-1">
                   <span class="mr-1" :class="selectedTestResult.result?.write?.success ? 'text-green-500' : 'text-red-500'">
-                    <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path
-                        stroke-linecap="round"
-                        stroke-linejoin="round"
-                        stroke-width="2"
-                        :d="selectedTestResult.result?.write?.success ? 'M5 13l4 4L19 7' : 'M6 18L18 6M6 6l12 12'"
-                      ></path>
-                    </svg>
+                    <IconCheck v-if="selectedTestResult.result?.write?.success" class="h-4 w-4" />
+                    <IconClose v-else class="h-4 w-4" />
                   </span>
                   <span :class="selectedTestResult.result?.write?.success ? 'text-green-700 dark:text-green-400' : 'text-red-700 dark:text-red-400'">
                     {{ selectedTestResult.result?.write?.success ? "写入权限测试成功" : "写入权限测试失败" }}
@@ -620,19 +752,21 @@ onMounted(() => {
 
                 <!-- 添加测试说明 -->
                 <div v-if="selectedTestResult.result?.write?.note" class="mb-2 pl-5 text-amber-600 dark:text-amber-400 text-xs italic">
-                  <svg class="h-3 w-3 inline-block mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                  </svg>
+                  <IconError class="h-3 w-3 inline-block mr-1" />
                   {{ selectedTestResult.result.write.note }}
                 </div>
 
                 <div v-if="selectedTestResult.result?.write?.success" class="pl-5">
                   <div class="grid grid-cols-2 gap-1">
-                    <div class="text-gray-500 dark:text-gray-400">测试文件:</div>
-                    <div class="text-gray-900 dark:text-gray-200 truncate">{{ selectedTestResult.result.write.testFile }}</div>
+                    <template v-if="selectedTestResult.result.write.testFile">
+                      <div class="text-gray-500 dark:text-gray-400">测试文件:</div>
+                      <div class="text-gray-900 dark:text-gray-200 truncate">{{ selectedTestResult.result.write.testFile }}</div>
+                    </template>
 
-                    <div v-if="selectedTestResult.result.write.uploadTime" class="text-gray-500 dark:text-gray-400">上传时间:</div>
-                    <div v-if="selectedTestResult.result.write.uploadTime" class="text-gray-900 dark:text-gray-200">{{ selectedTestResult.result.write.uploadTime }}ms</div>
+                    <template v-if="selectedTestResult.result.write.uploadTime">
+                      <div class="text-gray-500 dark:text-gray-400">上传时间:</div>
+                      <div class="text-gray-900 dark:text-gray-200">{{ selectedTestResult.result.write.uploadTime }}ms</div>
+                    </template>
 
                     <div class="text-gray-500 dark:text-gray-400">已清理:</div>
                     <div :class="selectedTestResult.result.write.cleaned ? 'text-green-600 dark:text-green-400' : 'text-yellow-600 dark:text-yellow-400'">
@@ -679,14 +813,8 @@ onMounted(() => {
               <div class="bg-gray-50 dark:bg-gray-900/50 rounded p-2 sm:p-3 text-xs sm:text-sm">
                 <div class="flex items-center mb-1">
                   <span class="mr-1" :class="selectedTestResult.result?.cors?.success ? 'text-green-500' : 'text-red-500'">
-                    <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path
-                        stroke-linecap="round"
-                        stroke-linejoin="round"
-                        stroke-width="2"
-                        :d="selectedTestResult.result?.cors?.success ? 'M5 13l4 4L19 7' : 'M6 18L18 6M6 6l12 12'"
-                      ></path>
-                    </svg>
+                    <IconCheck v-if="selectedTestResult.result?.cors?.success" class="h-4 w-4" />
+                    <IconClose v-else class="h-4 w-4" />
                   </span>
                   <span :class="selectedTestResult.result?.cors?.success ? 'text-green-700 dark:text-green-400' : 'text-red-700 dark:text-red-400'">
                     {{ selectedTestResult.result?.cors?.success ? "CORS预检请求测试通过" : "CORS预检请求测试失败" }}
@@ -822,14 +950,8 @@ onMounted(() => {
               <div class="bg-gray-50 dark:bg-gray-900/50 rounded p-2 sm:p-3 text-xs sm:text-sm">
                 <div class="flex items-center mb-1">
                   <span class="mr-1" :class="selectedTestResult.result?.frontendSim?.success ? 'text-green-500' : 'text-red-500'">
-                    <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path
-                        stroke-linecap="round"
-                        stroke-linejoin="round"
-                        stroke-width="2"
-                        :d="selectedTestResult.result?.frontendSim?.success ? 'M5 13l4 4L19 7' : 'M6 18L18 6M6 6l12 12'"
-                      ></path>
-                    </svg>
+                    <IconCheck v-if="selectedTestResult.result?.frontendSim?.success" class="h-4 w-4" />
+                    <IconClose v-else class="h-4 w-4" />
                   </span>
                   <span :class="selectedTestResult.result?.frontendSim?.success ? 'text-green-700 dark:text-green-400' : 'text-red-700 dark:text-red-400'">
                   {{ selectedTestResult.result?.frontendSim?.success ? "上传测试通过" : "上传测试失败" }}
@@ -838,9 +960,7 @@ onMounted(() => {
 
                 <!-- 添加测试说明 -->
                 <div v-if="selectedTestResult.result?.frontendSim?.note" class="mb-2 pl-5 text-amber-600 dark:text-amber-400 text-xs italic">
-                  <svg class="h-3 w-3 inline-block mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                  </svg>
+                  <IconError class="h-3 w-3 inline-block mr-1" />
                   {{ selectedTestResult.result.frontendSim.note }}
                 </div>
 
@@ -857,14 +977,8 @@ onMounted(() => {
                       </span>
                       <span class="font-medium">{{ selectedTestResult.result.frontendSim.steps.step1?.name || "获取预签名URL" }}</span>
                       <span class="ml-auto" :class="selectedTestResult.result.frontendSim.steps.step1?.success ? 'text-green-500' : 'text-red-500'">
-                        <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path
-                            stroke-linecap="round"
-                            stroke-linejoin="round"
-                            stroke-width="2"
-                            :d="selectedTestResult.result.frontendSim.steps.step1?.success ? 'M5 13l4 4L19 7' : 'M6 18L18 6M6 6l12 12'"
-                          ></path>
-                        </svg>
+                        <IconCheck v-if="selectedTestResult.result.frontendSim.steps.step1?.success" class="h-4 w-4" />
+                        <IconClose v-else class="h-4 w-4" />
                       </span>
                     </div>
                     <!-- 步骤1详情 -->
@@ -878,9 +992,7 @@ onMounted(() => {
                           @click="$event.currentTarget.previousElementSibling.classList.toggle('whitespace-nowrap')"
                           class="text-blue-500 hover:text-blue-600 text-xs ml-1 inline-flex items-center"
                         >
-                          <svg class="h-3 w-3 mr-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
-                          </svg>
+                          <IconChevronRight class="h-3 w-3 mr-0.5" />
                           <span>展开/收起</span>
                         </button>
                       </div>
@@ -911,14 +1023,8 @@ onMounted(() => {
                         class="ml-auto"
                         :class="selectedTestResult.result.frontendSim.steps.step2?.success ? 'text-green-500' : 'text-red-500'"
                       >
-                        <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path
-                            stroke-linecap="round"
-                            stroke-linejoin="round"
-                            stroke-width="2"
-                            :d="selectedTestResult.result.frontendSim.steps.step2?.success ? 'M5 13l4 4L19 7' : 'M6 18L18 6M6 6l12 12'"
-                          ></path>
-                        </svg>
+                        <IconCheck v-if="selectedTestResult.result.frontendSim.steps.step2?.success" class="h-4 w-4" />
+                        <IconClose v-else class="h-4 w-4" />
                       </span>
                     </div>
                     <!-- 步骤2详情 -->
@@ -969,14 +1075,8 @@ onMounted(() => {
                         class="ml-auto"
                         :class="selectedTestResult.result.frontendSim.steps.step3?.success ? 'text-green-500' : 'text-red-500'"
                       >
-                        <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path
-                            stroke-linecap="round"
-                            stroke-linejoin="round"
-                            stroke-width="2"
-                            :d="selectedTestResult.result.frontendSim.steps.step3?.success ? 'M5 13l4 4L19 7' : 'M6 18L18 6M6 6l12 12'"
-                          ></path>
-                        </svg>
+                        <IconCheck v-if="selectedTestResult.result.frontendSim.steps.step3?.success" class="h-4 w-4" />
+                        <IconClose v-else class="h-4 w-4" />
                       </span>
                     </div>
                     <!-- 步骤3详情 -->
@@ -1040,6 +1140,13 @@ onMounted(() => {
         </div>
       </div>
     </div>
+
+    <!-- 确认对话框 -->
+    <ConfirmDialog
+      v-bind="dialogState"
+      @confirm="handleConfirm"
+      @cancel="handleCancel"
+    />
   </div>
 </template>
 

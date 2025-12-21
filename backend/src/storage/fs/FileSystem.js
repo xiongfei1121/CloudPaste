@@ -7,10 +7,19 @@
 import { ValidationError, AuthorizationError, DriverError } from "../../http/errors.js";
 import { ApiStatus } from "../../constants/index.js";
 import { CAPABILITIES } from "../interfaces/capabilities/index.js";
-import { listDirectory as featureListDirectory, getFileInfo as featureGetFileInfo, downloadFile as featureDownloadFile, exists as featureExists } from "./features/read.js";
-import { generatePresignedUrl as featureGeneratePresignedUrl, commitPresignedUpload as featureCommitPresignedUpload } from "./features/presign.js";
-import { uploadFile as featureUploadFile, uploadStream as featureUploadStream, uploadDirect as featureUploadDirect, createDirectory as featureCreateDirectory, updateFile as featureUpdateFile } from "./features/write.js";
-import { renameItem as featureRenameItem, copyItem as featureCopyItem, batchRemoveItems as featureBatchRemoveItems, batchCopyItems as featureBatchCopyItems, handleCrossStorageCopy as featureHandleCrossStorageCopy, commitCrossStorageCopy as featureCommitCrossStorageCopy } from "./features/ops.js";
+import {
+  listDirectory as featureListDirectory,
+  getFileInfo as featureGetFileInfo,
+  downloadFile as featureDownloadFile,
+  exists as featureExists,
+} from "./features/read.js";
+import {
+  generateUploadUrl as featureGenerateUploadUrl,
+  generateFileLink as featureGenerateFileLink,
+  commitPresignedUpload as featureCommitPresignedUpload,
+} from "./features/presign.js";
+import { uploadFile as featureUploadFile, uploadDirect as featureUploadDirect, createDirectory as featureCreateDirectory, updateFile as featureUpdateFile } from "./features/write.js";
+import { renameItem as featureRenameItem, copyItem as featureCopyItem, batchRemoveItems as featureBatchRemoveItems } from "./features/ops.js";
 import {
   initializeFrontendMultipartUpload as featureInitMultipart,
   completeFrontendMultipartUpload as featureCompleteMultipart,
@@ -18,21 +27,34 @@ import {
   listMultipartUploads as featureListMultipartUploads,
   listMultipartParts as featureListMultipartParts,
   refreshMultipartUrls as featureRefreshMultipartUrls,
-  abortBackendMultipartUpload as featureAbortBackendMultipart,
 } from "./features/multipart.js";
 import cacheBus, { CACHE_EVENTS } from "../../cache/cacheBus.js";
 import { ensureRepositoryFactory } from "../../utils/repositories.js";
 import { getAccessibleMountsForUser } from "../../security/helpers/access.js";
 import { UserType } from "../../constants/index.js";
+import { FsMetaService } from "../../services/fsMetaService.js";
+import { sortSearchResults } from "./utils/SearchUtils.js";
+import { TaskPermissionMap, PermissionChecker, Permission } from "../../constants/permissions.js";
+import { calculateSubPath, normalizeMountPath } from "./utils/MountResolver.js";
+import { normalizePath as normalizeFsPath } from "./utils/PathResolver.js";
+/**
+ * 模块说明：
+ * - 角色：FS 视图的门面层，连接路由/API 与底层存储驱动。
+ * - 职责：挂载解析、权限校验、缓存失效、CRUD/分片/预签名/跨存储复制/搜索的调度，具体操作委托 fs/features/*。
+ * - 约定：所有驱动调用通过能力检查（CAPABILITIES），不直接依赖具体驱动类型；输入路径均为挂载视图路径。
+ */
 
 export class FileSystem {
   /**
    * 构造函数
    * @param {MountManager} mountManager - 挂载管理器实例
+   * @param {Object} env - 运行时环境（可选，用于 TaskOrchestrator 初始化）
    */
-  constructor(mountManager) {
+  constructor(mountManager, env = null) {
     this.mountManager = mountManager;
     this.repositoryFactory = mountManager?.repositoryFactory ?? null;
+    this.env = env;
+    this._taskOrchestrator = null; // 懒加载的 TaskOrchestrator 实例
   }
 
   /**
@@ -45,7 +67,35 @@ export class FileSystem {
    * @returns {Promise<Object>} 目录内容
    */
   async listDirectory(path, userIdOrInfo, userType, options = {}) {
-    return await featureListDirectory(this, path, userIdOrInfo, userType, options);
+    const baseResult = await featureListDirectory(this, path, userIdOrInfo, userType, options);
+
+    try {
+      const db = this.mountManager?.db;
+      if (!db) {
+        return baseResult;
+      }
+
+      const metaService = new FsMetaService(db, this.repositoryFactory);
+      const resolvedMeta = await metaService.resolveMetaForPath(path);
+
+      // 仅向前端暴露与展示相关的 meta 字段，避免泄露路径密码
+      const safeMeta =
+        resolvedMeta && (resolvedMeta.headerMarkdown || resolvedMeta.footerMarkdown || (resolvedMeta.hidePatterns?.length ?? 0) > 0)
+          ? {
+              headerMarkdown: resolvedMeta.headerMarkdown ?? null,
+              footerMarkdown: resolvedMeta.footerMarkdown ?? null,
+              hidePatterns: resolvedMeta.hidePatterns ?? [],
+            }
+          : null;
+
+      return {
+        ...baseResult,
+        meta: safeMeta,
+      };
+    } catch (error) {
+      console.warn("解析 FS Meta 失败，将返回基础目录结果：", error);
+      return baseResult;
+    }
   }
 
   /**
@@ -67,40 +117,26 @@ export class FileSystem {
    * @param {Request} request - 请求对象
    * @param {string|Object} userIdOrInfo - 用户ID或API密钥信息
    * @param {string} userType - 用户类型
-   * @returns {Promise<Response>} 文件响应
+   * @returns {Promise<import('../streaming/types.js').StorageStreamDescriptor>} 流描述对象
    */
   async downloadFile(path, fileName, request, userIdOrInfo, userType) {
     return await featureDownloadFile(this, path, fileName, request, userIdOrInfo, userType);
   }
 
   /**
-   * 上传文件
+   * 上传文件（统一入口）
    * @param {string} path - 目标路径
-   * @param {File} file - 文件对象
-   * @param {string|Object} userIdOrInfo - 用户ID或API密钥信息
-   * @param {string} userType - 用户类型
-   * @param {Object} options - 选项参数
-   * @returns {Promise<Object>} 上传结果
-   */
-  async uploadFile(path, file, userIdOrInfo, userType, options = {}) {
-    return await featureUploadFile(this, path, file, userIdOrInfo, userType, options);
-  }
-
-  /**
-   * 上传流式数据
-   * @param {string} path - 目标路径
-   * @param {ReadableStream} stream - 数据流
+   * @param {ReadableStream|ArrayBuffer|Uint8Array|Buffer|File|Blob|string} fileOrStream - 数据源
    * @param {string|Object} userIdOrInfo - 用户ID或API密钥信息
    * @param {string} userType - 用户类型
    * @param {Object} options - 选项参数
    * @param {string} options.filename - 文件名
    * @param {string} options.contentType - 内容类型
    * @param {number} options.contentLength - 内容长度
-   * @param {boolean} options.useMultipart - 是否使用分片上传
    * @returns {Promise<Object>} 上传结果
    */
-  async uploadStream(path, stream, userIdOrInfo, userType, options = {}) {
-    return await featureUploadStream(this, path, stream, userIdOrInfo, userType, options);
+  async uploadFile(path, fileOrStream, userIdOrInfo, userType, options = {}) {
+    return await featureUploadFile(this, path, fileOrStream, userIdOrInfo, userType, options);
   }
 
   /**
@@ -181,26 +217,27 @@ export class FileSystem {
   }
 
   /**
-   * 批量复制文件和目录
-   * @param {Array<Object>} items - 复制项数组，每项包含sourcePath和targetPath
-   * @param {string|Object} userIdOrInfo - 用户ID或API密钥信息
-   * @param {string} userType - 用户类型
-   * @returns {Promise<Object>} 批量复制结果
-   */
-  async batchCopyItems(items, userIdOrInfo, userType) {
-    return await featureBatchCopyItems(this, items, userIdOrInfo, userType);
-  }
-
-  /**
-   * 生成预签名URL
+   * 生成预签名上传URL（严格模式，仅支持具备 PRESIGNED 能力的驱动）
    * @param {string} path - 文件路径
    * @param {string|Object} userIdOrInfo - 用户ID或API密钥信息
    * @param {string} userType - 用户类型
    * @param {Object} options - 选项参数
-   * @returns {Promise<Object>} 预签名URL信息
+   * @returns {Promise<Object>} 预签名上传URL信息
    */
-  async generatePresignedUrl(path, userIdOrInfo, userType, options = {}) {
-    return await featureGeneratePresignedUrl(this, path, userIdOrInfo, userType, options);
+  async generateUploadUrl(path, userIdOrInfo, userType, options = {}) {
+    return await featureGenerateUploadUrl(this, path, userIdOrInfo, userType, options);
+  }
+
+  /**
+   * 生成通用文件链接（根据驱动能力与挂载配置在预签名与代理之间做决策）
+   * @param {string} path - 文件路径
+   * @param {string|Object} userIdOrInfo - 用户ID或API密钥信息
+   * @param {string} userType - 用户类型
+   * @param {Object} options - 选项参数
+   * @returns {Promise<Object>} 文件链接信息 { url, type, expiresIn?, proxyPolicy? }
+   */
+  async generateFileLink(path, userIdOrInfo, userType, options = {}) {
+    return await featureGenerateFileLink(this, path, userIdOrInfo, userType, options);
   }
 
   /**
@@ -286,120 +323,6 @@ export class FileSystem {
     return await featureRefreshMultipartUrls(this, path, uploadId, partNumbers, userIdOrInfo, userType, options);
   }
 
-  // /**
-  //  * 初始化后端分片上传 - 已废弃，项目使用前端分片上传
-  //  * @deprecated 使用前端分片上传 initializeFrontendMultipartUpload 替代
-  //  * @param {string} path - 目标路径
-  //  * @param {string|Object} userIdOrInfo - 用户ID或API密钥信息
-  //  * @param {string} userType - 用户类型
-  //  * @param {string} contentType - 内容类型
-  //  * @param {number} fileSize - 文件大小
-  //  * @param {string} filename - 文件名
-  //  * @returns {Promise<Object>} 初始化结果
-  //  */
-  // async initializeBackendMultipartUpload(path, userIdOrInfo, userType, contentType, fileSize, filename) {
-  //   const { driver, mount, subPath } = await this.mountManager.getDriverByPath(path, userIdOrInfo, userType);
-
-  //   if (!driver.hasCapability(CAPABILITIES.MULTIPART)) {
-  //     throw new DriverError(`存储驱动 ${driver.getType()} 不支持分片上传`, {
-  //       status: ApiStatus.NOT_IMPLEMENTED,
-  //       expose: true,
-  //     });
-  //   }
-
-  //   return await driver.initializeBackendMultipartUpload(path, {
-  //     mount,
-  //     subPath,
-  //     db: this.mountManager.db,
-  //     contentType,
-  //     fileSize,
-  //     filename,
-  //   });
-  // }
-
-  // /**
-  //  * 上传后端分片 - 已废弃，项目使用前端分片上传
-  //  * @deprecated 使用前端分片上传替代
-  //  * @param {string} path - 目标路径
-  //  * @param {string|Object} userIdOrInfo - 用户ID或API密钥信息
-  //  * @param {string} userType - 用户类型
-  //  * @param {string} uploadId - 上传ID
-  //  * @param {number} partNumber - 分片编号
-  //  * @param {ArrayBuffer} partData - 分片数据
-  //  * @param {string} s3Key - S3键（可选）
-  //  * @returns {Promise<Object>} 上传结果
-  //  */
-  // async uploadBackendPart(path, userIdOrInfo, userType, uploadId, partNumber, partData, s3Key = null) {
-  //   const { driver, mount, subPath } = await this.mountManager.getDriverByPath(path, userIdOrInfo, userType);
-
-  //   if (!driver.hasCapability(CAPABILITIES.MULTIPART)) {
-  //     throw new DriverError(`存储驱动 ${driver.getType()} 不支持分片上传`, {
-  //       status: ApiStatus.NOT_IMPLEMENTED,
-  //       expose: true,
-  //     });
-  //   }
-
-  //   return await driver.uploadBackendPart(path, {
-  //     mount,
-  //     subPath,
-  //     db: this.mountManager.db,
-  //     uploadId,
-  //     partNumber,
-  //     partData,
-  //     s3Key,
-  //   });
-  // }
-
-  // /**
-  //  * 完成后端分片上传 - 已废弃，项目使用前端分片上传
-  //  * @deprecated 使用前端分片上传 completeFrontendMultipartUpload 替代
-  //  * @param {string} path - 目标路径
-  //  * @param {string|Object} userIdOrInfo - 用户ID或API密钥信息
-  //  * @param {string} userType - 用户类型
-  //  * @param {string} uploadId - 上传ID
-  //  * @param {Array} parts - 分片信息
-  //  * @param {string} contentType - 内容类型
-  //  * @param {number} fileSize - 文件大小
-  //  * @param {string} s3Key - S3键（可选）
-  //  * @returns {Promise<Object>} 完成结果
-  //  */
-  // async completeBackendMultipartUpload(path, userIdOrInfo, userType, uploadId, parts, contentType, fileSize, s3Key = null) {
-  //   const { driver, mount, subPath } = await this.mountManager.getDriverByPath(path, userIdOrInfo, userType);
-
-  //   if (!driver.hasCapability(CAPABILITIES.MULTIPART)) {
-  //     throw new DriverError(`存储驱动 ${driver.getType()} 不支持分片上传`, {
-  //       status: ApiStatus.NOT_IMPLEMENTED,
-  //       expose: true,
-  //     });
-  //   }
-
-  //   return await driver.completeBackendMultipartUpload(path, {
-  //     mount,
-  //     subPath,
-  //     db: this.mountManager.db,
-  //     uploadId,
-  //     parts,
-  //     contentType,
-  //     fileSize,
-  //     userIdOrInfo,
-  //     userType,
-  //     s3Key,
-  //   });
-  // }
-
-  /**
-   * 中止后端分片上传
-   * @param {string} path - 目标路径
-   * @param {string|Object} userIdOrInfo - 用户ID或API密钥信息
-   * @param {string} userType - 用户类型
-   * @param {string} uploadId - 上传ID
-   * @param {string} s3Key - S3键（可选）
-   * @returns {Promise<Object>} 中止结果
-   */
-  async abortBackendMultipartUpload(path, userIdOrInfo, userType, uploadId, s3Key = null) {
-    return await featureAbortBackendMultipart(this, path, userIdOrInfo, userType, uploadId, s3Key);
-  }
-
   /**
    * 检查文件或目录是否存在
    * @param {string} path - 文件或目录路径
@@ -421,18 +344,6 @@ export class FileSystem {
    */
   async updateFile(path, content, userIdOrInfo, userType) {
     return await featureUpdateFile(this, path, content, userIdOrInfo, userType);
-  }
-
-  /**
-   * 跨存储复制文件
-   * @param {string} sourcePath - 源路径
-   * @param {string} targetPath - 目标路径
-   * @param {string|Object} userIdOrInfo - 用户ID或API密钥信息
-   * @param {string} userType - 用户类型
-   * @returns {Promise<Object>} 跨存储复制结果
-   */
-  async handleCrossStorageCopy(sourcePath, targetPath, userIdOrInfo, userType) {
-    return await featureHandleCrossStorageCopy(this, sourcePath, targetPath, userIdOrInfo, userType);
   }
 
   /**
@@ -522,8 +433,12 @@ export class FileSystem {
       try {
         const driver = await this.mountManager.getDriver(mount);
 
-        // 检查驱动是否支持搜索（通过ReaderCapable）
-        if (!driver.hasCapability(CAPABILITIES.READER)) {
+        // 检查驱动是否支持搜索：同时具备 READER + SEARCH 能力，且实现 search 方法
+        if (
+          !driver.hasCapability(CAPABILITIES.READER) ||
+          !driver.hasCapability(CAPABILITIES.SEARCH) ||
+          typeof driver.search !== "function"
+        ) {
           return [];
         }
 
@@ -549,9 +464,8 @@ export class FileSystem {
       }
     }
 
-    // 排序和分页
-    const { S3SearchOperations } = await import("../drivers/s3/operations/S3SearchOperations.js");
-    const sortedResults = S3SearchOperations.sortSearchResults(allResults, query);
+    // 排序和分页（使用通用排序工具）
+    const sortedResults = sortSearchResults(allResults, query);
     const total = sortedResults.length;
     const paginatedResults = sortedResults.slice(offset, offset + limit);
 
@@ -573,27 +487,76 @@ export class FileSystem {
     return searchResult;
   }
 
-  /**
-   * 提交跨存储复制（客户端已完成复制后，通知后端进行缓存失效等收尾）
-   * @param {Object} mount - 目标挂载点对象
-   * @param {Array<Object>} files - 提交的文件列表，包含 targetPath 与 storagePath
-   * @returns {Promise<{success: Array, failed: Array}>}
-   */
-  async commitCrossStorageCopy(mount, files) {
-    return await featureCommitCrossStorageCopy(this, mount, files);
-  }
-
   emitCacheInvalidation(payload = {}) {
     try {
       const { mount = null, mountId = null, storageConfigId = null, paths = [], reason = "fs_operation" } = payload;
       const resolvedMountId = mount?.id ?? mountId ?? null;
       const resolvedStorageConfigId = mount?.storage_config_id ?? storageConfigId ?? null;
-      const normalizedPaths = Array.isArray(paths) ? paths.filter((path) => typeof path === "string" && path.length > 0) : [];
+      const rawPaths = Array.isArray(paths) ? paths.filter((path) => typeof path === "string" && path.length > 0) : [];
+
+      // - 若能解析 mount.mount_path，则将 fullPath -> subPath；让 DirectoryCacheManager.invalidatePathAndAncestors 正确命中。
+      // - 若无法解析（缺少 mount 或路径不在 mount 内），降级为挂载点级失效（paths=[]），保证一致性优先。
+      let normalizedSubPaths = rawPaths;
+      if (rawPaths.length > 0) {
+        const mountPathRaw = mount?.mount_path || null;
+        if (!mountPathRaw) {
+          normalizedSubPaths = [];
+        } else {
+          const mountPath = normalizeMountPath(mountPathRaw);
+          const mapped = [];
+          let mappingFailed = false;
+
+          for (const p of rawPaths) {
+            // NOTE: 是否目录（以 / 结尾）只用于“失效粒度收敛”，不能在 normalizeFsPath 后判断。
+            const isDirectoryHint = p.endsWith("/");
+            const fullPath = normalizeFsPath(p);
+            if (fullPath === mountPath || fullPath === `${mountPath}/` || fullPath.startsWith(`${mountPath}/`)) {
+              mapped.push({ subPath: calculateSubPath(fullPath, mountPath), isDirectoryHint });
+            } else {
+              mappingFailed = true;
+              break;
+            }
+          }
+
+          if (mappingFailed) {
+            normalizedSubPaths = [];
+          } else {
+            // - 目录路径（以 / 结尾的 hint）：失效该目录自身（祖先级联会覆盖父目录）。
+            // - 文件路径：失效其父目录。
+            const toParentDir = (subPath) => {
+              const raw = typeof subPath === "string" && subPath ? subPath : "/";
+              const withLeading = raw.startsWith("/") ? raw : `/${raw}`;
+              const collapsed = withLeading.replace(/\/{2,}/g, "/");
+              if (collapsed === "/") return "/";
+              const normalized = collapsed.replace(/\/+$/, "");
+              const lastSlash = normalized.lastIndexOf("/");
+              if (lastSlash <= 0) return "/";
+              return normalized.slice(0, lastSlash) || "/";
+            };
+
+            const dirSet = new Set();
+            for (const item of mapped) {
+              const sp = item?.subPath;
+              if (!sp) continue;
+              if (item.isDirectoryHint) {
+                dirSet.add(sp);
+              } else {
+                dirSet.add(toParentDir(sp));
+              }
+            }
+
+            // KISS：超过阈值直接降级为 mount 级失效。
+            const MAX_INVALIDATION_DIRS = 200;
+            normalizedSubPaths = dirSet.size > MAX_INVALIDATION_DIRS ? [] : Array.from(dirSet);
+          }
+        }
+      }
+
       cacheBus.emit(CACHE_EVENTS.INVALIDATE, {
         target: "fs",
         mountId: resolvedMountId,
         storageConfigId: resolvedStorageConfigId,
-        paths: normalizedPaths,
+        paths: normalizedSubPaths,
         reason,
         db: this.mountManager.db,
       });
@@ -612,7 +575,16 @@ export class FileSystem {
   async getStats(path, userIdOrInfo, userType) {
     if (path) {
       const { driver } = await this.mountManager.getDriverByPath(path, userIdOrInfo, userType);
-      return await driver.getStats();
+      // 安全检查：getStats 是可选方法，不是所有驱动都实现
+      if (typeof driver.getStats === "function") {
+        return await driver.getStats();
+      }
+      // 驱动未实现 getStats，返回基本信息
+      return {
+        type: driver.getType?.() || "unknown",
+        supported: false,
+        message: "此存储驱动不支持统计信息",
+      };
     } else {
       // 返回整个文件系统的统计信息
       return {
@@ -624,10 +596,254 @@ export class FileSystem {
   }
 
   /**
+   * 获取 TaskOrchestrator 实例（懒加载）
+   * @private
+   * @returns {Promise<TaskOrchestratorAdapter>} TaskOrchestrator 实例
+   */
+  async getTaskOrchestrator() {
+    if (!this._taskOrchestrator) {
+      // 动态导入 TaskOrchestrator 工厂函数
+      const { createTaskOrchestrator } = await import('./tasks/index.js');
+
+      // 构建 RuntimeEnv 对象
+      const runtimeEnv = {
+        // Cloudflare Workers bindings (如果存在)
+        JOB_WORKFLOW: this.env?.JOB_WORKFLOW,
+        DB: this.env?.DB,
+
+        // Docker/Node.js configuration (由 unified-entry.js 自动设置，复用主数据库)
+        TASK_DATABASE_PATH: this.env?.TASK_DATABASE_PATH,
+        TASK_WORKER_POOL_SIZE: this.env?.TASK_WORKER_POOL_SIZE,
+      };
+
+      this._taskOrchestrator = createTaskOrchestrator(this, runtimeEnv);
+    }
+
+    return this._taskOrchestrator;
+  }
+
+  /**
+   * 创建通用作业 (支持多任务类型)
+   * @param {string} taskType - 任务类型 (copy, scheduled-sync, cleanup, etc.)
+   * @param {any} payload - 任务载荷 (由 TaskHandler 验证)
+   * @param {string|Object} userIdOrInfo - 用户ID或API密钥信息
+   * @param {string} userType - 用户类型
+   * @returns {Promise<Object>} 作业描述符 { jobId, taskType, status, stats, createdAt }
+   */
+  async createJob(taskType, payload, userIdOrInfo, userType) {
+    if (!taskType || typeof taskType !== 'string') {
+      throw new ValidationError('请提供有效的任务类型');
+    }
+
+    if (!payload) {
+      throw new ValidationError('请提供任务载荷');
+    }
+
+    const orchestrator = await this.getTaskOrchestrator();
+
+    // 创建作业 (验证逻辑由 TaskHandler 负责)
+    const jobDescriptor = await orchestrator.createJob({
+      taskType,
+      payload,
+      userId: typeof userIdOrInfo === 'string' ? userIdOrInfo : userIdOrInfo?.id || userIdOrInfo?.name,
+      userType,
+    });
+
+    return jobDescriptor;
+  }
+
+  /**
+   * 计算任务的允许操作
+   * @private
+   * @param {Object} job - 任务对象
+   * @param {number|undefined} userPermissions - 用户权限位标志
+   * @param {string} userType - 用户类型
+   * @returns {Object} 允许的操作 { canView, canCancel, canDelete, canRetry }
+   */
+  _computeAllowedActions(job, userPermissions, userType) {
+    // 管理员拥有所有操作权限
+    if (userType === UserType.ADMIN) {
+      return {
+        canView: true,
+        canCancel: ['pending', 'running'].includes(job.status),
+        canDelete: !['pending', 'running'].includes(job.status),
+        canRetry: ['failed', 'partial'].includes(job.status),
+      };
+    }
+
+    // 非管理员：根据任务类型检查权限
+    const requiredPermission = TaskPermissionMap[job.taskType];
+    const hasTypePermission = requiredPermission && userPermissions !== undefined
+      ? PermissionChecker.hasPermission(userPermissions, requiredPermission)
+      : false;
+
+    return {
+      canView: true,  // 能获取到任务说明有查看权限
+      canCancel: hasTypePermission && ['pending', 'running'].includes(job.status),
+      canDelete: hasTypePermission && !['pending', 'running'].includes(job.status),
+      canRetry: hasTypePermission && ['failed', 'partial'].includes(job.status),
+    };
+  }
+
+  /**
+   * 获取作业状态
+   * @param {string} jobId - 作业ID
+   * @param {string|Object} userIdOrInfo - 用户ID或API密钥信息
+   * @param {string} userType - 用户类型
+   * @returns {Promise<Object>} 作业状态 { jobId, taskType, status, stats, allowedActions, ... }
+   */
+  async getJobStatus(jobId, userIdOrInfo, userType) {
+    if (!jobId) {
+      throw new ValidationError('请提供作业ID');
+    }
+
+    const orchestrator = await this.getTaskOrchestrator();
+    const jobStatus = await orchestrator.getJobStatus(jobId);
+
+    // 权限验证：只有任务创建者或管理员可以查看
+    if (userType !== UserType.ADMIN) {
+      const currentUserId = typeof userIdOrInfo === 'string'
+        ? userIdOrInfo
+        : userIdOrInfo?.id || userIdOrInfo?.name;
+
+      if (jobStatus.userId !== currentUserId) {
+        throw new AuthorizationError('无权访问此任务');
+      }
+    }
+
+    // 计算允许的操作
+    const userPermissions = typeof userIdOrInfo === 'object' ? userIdOrInfo?.permissions : undefined;
+    const allowedActions = this._computeAllowedActions(jobStatus, userPermissions, userType);
+
+    return {
+      ...jobStatus,
+      allowedActions,
+    };
+  }
+
+  /**
+   * 取消作业
+   * @param {string} jobId - 作业ID
+   * @param {string|Object} userIdOrInfo - 用户ID或API密钥信息
+   * @param {string} userType - 用户类型
+   * @returns {Promise<void>}
+   */
+  async cancelJob(jobId, userIdOrInfo, userType) {
+    if (!jobId) {
+      throw new ValidationError('请提供作业ID');
+    }
+
+    // 先获取任务状态并验证权限（复用 getJobStatus 的权限检查）
+    const jobStatus = await this.getJobStatus(jobId, userIdOrInfo, userType);
+
+    // 检查操作权限（基于 allowedActions）
+    if (!jobStatus.allowedActions?.canCancel) {
+      throw new AuthorizationError('无权取消此任务');
+    }
+
+    // 检查任务状态是否可取消
+    if (jobStatus.status !== 'pending' && jobStatus.status !== 'running') {
+      throw new ValidationError('只能取消待执行或执行中的任务');
+    }
+
+    const orchestrator = await this.getTaskOrchestrator();
+    await orchestrator.cancelJob(jobId);
+  }
+
+  /**
+   * 列出作业 (支持任务类型过滤)
+   * @param {Object} filter - 过滤条件
+   * @param {string} filter.taskType - 任务类型（copy, scheduled-sync, cleanup, etc.）
+   * @param {string} filter.status - 作业状态（pending/running/completed/partial/failed/cancelled）
+   * @param {string} filter.userId - 用户ID（内部使用，由权限检查逻辑控制）
+   * @param {number} filter.limit - 返回数量限制
+   * @param {number} filter.offset - 偏移量
+   * @param {string|Object} userIdOrInfo - 用户ID或API密钥信息
+   * @param {string} userType - 用户类型
+   * @returns {Promise<Array<Object>>} 作业描述符数组（含 allowedActions）
+   */
+  async listJobs(filter = {}, userIdOrInfo, userType) {
+    // 非管理员用户：强制过滤为只能看到自己的任务
+    const finalFilter = { ...filter };
+
+    if (userType !== UserType.ADMIN) {
+      const currentUserId = typeof userIdOrInfo === 'string'
+        ? userIdOrInfo
+        : userIdOrInfo?.id || userIdOrInfo?.name;
+
+      // 强制设置 userId 过滤条件，防止非管理员查看他人任务
+      finalFilter.userId = currentUserId;
+    }
+
+    const orchestrator = await this.getTaskOrchestrator();
+    let jobs = await orchestrator.listJobs(finalFilter);
+
+    // 获取用户权限
+    const userPermissions = typeof userIdOrInfo === 'object' ? userIdOrInfo?.permissions : undefined;
+
+    // 非管理员用户：根据任务类型权限过滤任务
+    if (userType !== UserType.ADMIN && userPermissions !== undefined) {
+      jobs = jobs.filter(job => {
+        const requiredPermission = TaskPermissionMap[job.taskType];
+
+        // 如果任务类型没有对应的权限映射，默认不显示
+        if (!requiredPermission) {
+          return false;
+        }
+
+        // 检查用户是否拥有该任务类型所需的权限
+        return PermissionChecker.hasPermission(userPermissions, requiredPermission);
+      });
+    }
+
+    // 为每个任务计算 allowedActions
+    const enrichedJobs = jobs.map(job => ({
+      ...job,
+      allowedActions: this._computeAllowedActions(job, userPermissions, userType),
+    }));
+
+    return enrichedJobs;
+  }
+
+  /**
+   * 删除作业
+   * @param {string} jobId - 作业ID
+   * @param {string|Object} userIdOrInfo - 用户ID或API密钥信息
+   * @param {string} userType - 用户类型
+   * @returns {Promise<void>}
+   */
+  async deleteJob(jobId, userIdOrInfo, userType) {
+    if (!jobId) {
+      throw new ValidationError('请提供作业ID');
+    }
+
+    // 先获取任务状态并验证权限
+    const jobStatus = await this.getJobStatus(jobId, userIdOrInfo, userType);
+
+    // 检查操作权限
+    if (!jobStatus.allowedActions?.canDelete) {
+      throw new AuthorizationError('无权删除此任务');
+    }
+
+    // 检查任务状态是否可删除
+    if (jobStatus.status === 'pending' || jobStatus.status === 'running') {
+      throw new ValidationError('不能删除待执行或执行中的任务，请先取消任务');
+    }
+
+    const orchestrator = await this.getTaskOrchestrator();
+    await orchestrator.deleteJob(jobId);
+  }
+
+  /**
    * 清理资源
    * @returns {Promise<void>}
    */
   async cleanup() {
+    // 清理任务编排器资源
+    if (this._taskOrchestrator && typeof this._taskOrchestrator.shutdown === 'function') {
+      await this._taskOrchestrator.shutdown();
+    }
+
     // 清理挂载管理器的资源
     if (this.mountManager && typeof this.mountManager.cleanup === "function") {
       await this.mountManager.cleanup();

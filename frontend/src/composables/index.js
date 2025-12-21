@@ -9,7 +9,6 @@ import { useThemeMode } from "./core/useThemeMode.js";
 // ===== 文件预览功能 =====
 import { usePreviewRenderers } from "./file-preview/usePreviewRenderers.js";
 import { useFilePreviewExtensions } from "./file-preview/useFilePreviewExtensions.js";
-import { useFilePreview } from "./file-preview/useFilePreview.js";
 
 // ===== 压缩文件功能 =====
 import { useArchivePreview } from "./archive/useArchivePreview.js";
@@ -26,7 +25,6 @@ import { useUIState } from "./ui-interaction/useUIState.js";
 import { useGalleryView } from "./ui-interaction/useGalleryView.js";
 import { usePhotoSwipe } from "./ui-interaction/usePhotoSwipe.js";
 import { useShareSettingsForm } from "./upload/useShareSettingsForm.js";
-import { useUploadQueue } from "./upload/useUploadQueue.js";
 
 // 重新导出所有功能
 export {
@@ -34,7 +32,6 @@ export {
   useThemeMode,
   usePreviewRenderers,
   useFilePreviewExtensions,
-  useFilePreview,
   useArchivePreview,
   useFileOperations,
   useDirectorySort,
@@ -45,7 +42,6 @@ export {
   useGalleryView,
   usePhotoSwipe,
   useShareSettingsForm,
-  useUploadQueue,
 };
 
 // ===== 便捷的聚合导出 =====
@@ -57,7 +53,6 @@ export {
 export const FilePreviewComposables = {
   usePreviewRenderers,
   useFilePreviewExtensions,
-  useFilePreview,
   useArchivePreview,
 };
 
@@ -160,7 +155,6 @@ export default {
   useThemeMode,
   usePreviewRenderers,
   useFilePreviewExtensions,
-  useFilePreview,
   useFileOperations,
   useDirectorySort,
   useFileBasket,
@@ -169,7 +163,6 @@ export default {
   useGalleryView,
   usePhotoSwipe,
   useShareSettingsForm,
-  useUploadQueue,
 
   // 聚合对象
   FilePreviewComposables,

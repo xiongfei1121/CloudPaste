@@ -157,7 +157,7 @@ export const DEFAULT_SETTINGS = {
     options: null,
     sort_order: 4,
     flag: SETTING_FLAGS.PUBLIC,
-    default_value: "jpg,tiff,jpeg,png,gif,bmp,svg,ico,swf,webp,avif",
+    default_value: "jpg,tiff,jpeg,png,gif,bmp,svg,ico,swf,webp,avif,heic,heif",
   },
 
   preview_office_types: {
@@ -182,19 +182,30 @@ export const DEFAULT_SETTINGS = {
     default_value: "pdf",
   },
 
+  preview_document_apps: {
+    key: "preview_document_apps",
+    type: SETTING_TYPES.TEXTAREA,
+    group_id: SETTING_GROUPS.PREVIEW,
+    help: "文档/Office 预览使用的 DocumentApp 模板配置，JSON 结构，按扩展名映射到各个预览服务的 URL 模板",
+    options: null,
+    sort_order: 7,
+    flag: SETTING_FLAGS.PUBLIC,
+    default_value: "",
+  },
+
   // WebDAV设置组
   webdav_upload_mode: {
     key: "webdav_upload_mode",
     type: SETTING_TYPES.SELECT,
     group_id: SETTING_GROUPS.WEBDAV,
-    help: "WebDAV客户端的上传模式选择。直接上传适合小文件，分片上传适合大文件。",
+    help: "WebDAV 客户端上传模式。流式上传大文件，单次上传适合小文件或兼容性场景。",
     options: JSON.stringify([
-      { value: "direct", label: "直接上传" },
-      { value: "multipart", label: "分片上传" },
+      { value: "chunked", label: "流式上传" },
+      { value: "single", label: "单次上传" },
     ]),
     sort_order: 1,
     flag: SETTING_FLAGS.PUBLIC,
-    default_value: "multipart",
+    default_value: "chunked",
   },
 
   // 站点设置组
@@ -326,7 +337,7 @@ export function validateSettingValue(key, value, type) {
 
     case SETTING_TYPES.SELECT:
       if (key === "webdav_upload_mode") {
-        return ["direct", "multipart"].includes(value);
+        return ["single", "chunked"].includes(value);
       }
       return true;
 

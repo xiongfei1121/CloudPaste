@@ -39,17 +39,14 @@
         @load="handleLoad"
         @error="handleError"
       />
+      <!-- 缺少内容URL或加载失败 -->
+      <div v-else-if="urlError" class="absolute inset-0 flex items-center justify-center bg-gray-100 dark:bg-gray-700">
+        <p class="text-red-600 dark:text-red-400 text-sm">{{ urlError }}</p>
+      </div>
       <!-- 加载状态 -->
       <div v-else class="absolute inset-0 flex items-center justify-center bg-gray-100 dark:bg-gray-700">
         <div class="text-center">
-          <svg class="animate-spin h-8 w-8 text-blue-500 mx-auto mb-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-            <path
-              class="opacity-75"
-              fill="currentColor"
-              d="M4 12a8 8 0 0 1 8-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 0 0 4 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-            ></path>
-          </svg>
+          <IconRefresh class="animate-spin h-8 w-8 text-blue-500 mx-auto mb-2" />
           <p class="text-blue-600 dark:text-blue-400">{{ loadingText || t("fileView.preview.code.loading") }}</p>
         </div>
       </div>
@@ -58,8 +55,9 @@
 </template>
 
 <script setup>
-import { computed, ref, onMounted, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
+import { IconRefresh } from "@/components/icons";
 import TextRenderer from "@/components/common/text-preview/TextRenderer.vue";
 import { useFetchText } from "@/composables/text-preview/useFetchText.js";
 import { useCodeHighlight } from "@/composables/text-preview/useCodeHighlight.js";
@@ -67,7 +65,7 @@ import { useCodeHighlight } from "@/composables/text-preview/useCodeHighlight.js
 const { t } = useI18n();
 
 const props = defineProps({
-  previewUrl: {
+  contentUrl: {
     type: String,
     required: true,
   },
@@ -99,6 +97,7 @@ const emit = defineEmits(["load", "error"]);
 const textContent = ref("");
 const detectedLanguage = ref("");
 const currentEncoding = ref("utf-8");
+const urlError = ref("");
 
 // 统计信息计算
 const lineCount = computed(() => {
@@ -119,29 +118,36 @@ const { detectLanguageFromFilename } = useCodeHighlight();
 
 // 适配数据结构
 const adaptedFileData = computed(() => {
-  if (!props.previewUrl) return null;
+  if (!props.contentUrl) return null;
 
   return {
     name: props.filename || "code-file",
     filename: props.filename || "code-file",
-    preview_url: props.previewUrl,
+    contentUrl: props.contentUrl,
     contentType: "text/plain",
   };
 });
 
 // 加载文本内容
 const loadTextContent = async () => {
-  if (!adaptedFileData.value?.preview_url) {
-    console.warn("没有可用的预览URL");
+  if (!adaptedFileData.value) {
+    console.warn("没有可用的文件数据");
     return;
   }
 
   try {
-    const result = await fetchText(adaptedFileData.value.preview_url, adaptedFileData.value);
+    const effectiveUrl = adaptedFileData.value.contentUrl;
+    if (!effectiveUrl) {
+      console.warn("缺少可用的代码内容 URL");
+      return;
+    }
+
+    const result = await fetchText(effectiveUrl, adaptedFileData.value);
 
     if (result.success) {
       textContent.value = result.text;
       currentEncoding.value = result.encoding || "utf-8";
+      urlError.value = "";
 
       // 检测语言
       const filename = adaptedFileData.value.name || "";
@@ -156,17 +162,19 @@ const loadTextContent = async () => {
 
       emit("load", result);
     } else {
+      urlError.value = result.error || "预览 URL 不可用";
       emit("error", result.error);
     }
   } catch (err) {
     console.error("加载代码内容失败:", err);
+    urlError.value = err.message || "预览 URL 不可用";
     emit("error", err.message);
   }
 };
 
 // 处理编码切换
 const handleEncodingChange = async () => {
-  if (!adaptedFileData.value?.preview_url) return;
+  if (!adaptedFileData.value) return;
 
   try {
     const result = await reDecodeWithEncoding(currentEncoding.value);
@@ -195,21 +203,18 @@ const handleError = (error) => {
   emit("error", error);
 };
 
-// 监听预览URL变化
+// 监听内容URL变化
 watch(
-  () => props.previewUrl,
-  () => {
-    if (props.previewUrl) {
-      loadTextContent();
+  () => props.contentUrl,
+  (url) => {
+    if (!url) {
+      urlError.value = "预览 URL 不可用";
+      emit("error", urlError.value);
+      return;
     }
+    urlError.value = "";
+    loadTextContent();
   },
   { immediate: true }
 );
-
-// 组件挂载时加载内容
-onMounted(() => {
-  if (props.previewUrl) {
-    loadTextContent();
-  }
-});
 </script>

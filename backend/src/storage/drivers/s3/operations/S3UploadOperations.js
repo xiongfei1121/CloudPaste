@@ -5,14 +5,21 @@
 
 import { ApiStatus } from "../../../../constants/index.js";
 import { AppError, ValidationError, S3DriverError } from "../../../../http/errors.js";
-import { generatePresignedPutUrl, buildS3Url } from "../utils/s3Utils.js";
+import { generateUploadUrl, buildS3Url } from "../utils/s3Utils.js";
 import { S3Client, PutObjectCommand, ListMultipartUploadsCommand, ListPartsCommand, UploadPartCommand, HeadObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { updateMountLastUsed } from "../../../fs/utils/MountResolver.js";
 import { getMimeTypeFromFilename } from "../../../../utils/fileUtils.js";
 import { handleFsError } from "../../../fs/utils/ErrorHandler.js";
 import { updateParentDirectoriesModifiedTime } from "../utils/S3DirectoryUtils.js";
-import { getEnvironmentOptimizedUploadConfig, convertStreamForAWSCompatibility } from "../../../../utils/environmentUtils.js";
+import { getEnvironmentOptimizedUploadConfig, isNodeJSEnvironment } from "../../../../utils/environmentUtils.js";
+import { updateUploadProgress } from "../../../utils/UploadProgressTracker.js";
+import {
+  createUploadSessionRecord,
+  computeUploadSessionFingerprintMetaV1,
+  updateUploadSessionStatusByFingerprint,
+  findUploadSessionByUploadUrl,
+} from "../../../../utils/uploadSessions.js";
 
 export class S3UploadOperations {
   /**
@@ -28,87 +35,6 @@ export class S3UploadOperations {
   }
 
   /**
-   * 待废弃，使用uploadStream代替
-   * 直接上传文件
-   * @param {string} s3SubPath - S3子路径
-   * @param {File} file - 文件对象
-   * @param {Object} options - 选项参数
-   * @returns {Promise<Object>} 上传结果
-   */
-  async uploadFile(s3SubPath, file, options = {}) {
-    const { mount, db } = options;
-
-    return handleFsError(
-      async () => {
-        // 统一从文件名推断MIME类型，不依赖file.type
-        const contentType = getMimeTypeFromFilename(file.name);
-        console.log(`直接上传：从文件名[${file.name}]推断MIME类型: ${contentType}`);
-
-        // 构建最终的S3路径
-        const fileName = file.name;
-        let finalS3Path;
-
-        // 智能检查s3SubPath是否已经包含完整的文件路径
-        const { isCompleteFilePath } = await import("../utils/S3PathUtils.js");
-        if (s3SubPath && isCompleteFilePath(s3SubPath, fileName)) {
-          // s3SubPath已经包含完整的文件路径，直接使用
-          finalS3Path = s3SubPath;
-        } else {
-          // s3SubPath是目录路径，需要拼接文件名
-          if (s3SubPath && !s3SubPath.endsWith("/")) {
-            finalS3Path = s3SubPath + "/" + fileName;
-          } else {
-            finalS3Path = s3SubPath + fileName;
-          }
-        }
-
-        console.log(`构建S3路径: subPath=[${s3SubPath}], fileName=[${fileName}], finalPath=[${finalS3Path}]`);
-
-        // 读取文件内容
-        const fileContent = await file.arrayBuffer();
-
-        // 准备上传参数
-        const putParams = {
-          Bucket: this.config.bucket_name,
-          Key: finalS3Path,
-          Body: fileContent,
-          ContentType: contentType,
-        };
-
-        // 执行上传
-        const putCommand = new PutObjectCommand(putParams);
-        const result = await this.s3Client.send(putCommand);
-
-        // 构建公共URL
-        const { buildS3Url } = await import("../utils/s3Utils.js");
-        const s3Url = buildS3Url(this.config, finalS3Path);
-
-        // 更新父目录的修改时间
-        const { updateParentDirectoriesModifiedTime } = await import("../utils/S3DirectoryUtils.js");
-        await updateParentDirectoriesModifiedTime(this.s3Client, this.config.bucket_name, finalS3Path);
-
-        // 更新最后使用时间
-        if (db && mount && mount.id) {
-          await updateMountLastUsed(db, mount.id);
-        }
-
-        return {
-          success: true,
-          fileName: fileName,
-          size: file.size,
-          contentType: contentType,
-          storagePath: finalS3Path,
-          publicUrl: s3Url,
-          etag: result.ETag ? result.ETag.replace(/"/g, "") : null,
-          message: "文件上传成功",
-        };
-      },
-      "上传文件",
-      "上传文件失败"
-    );
-  }
-
-  /**
    * 上传流式数据
    * @param {string} s3SubPath - S3子路径
    * @param {ReadableStream} stream - 数据流
@@ -116,13 +42,12 @@ export class S3UploadOperations {
    * @returns {Promise<Object>} 上传结果
    */
   async uploadStream(s3SubPath, stream, options = {}) {
-    const { mount, db, filename, contentType, contentLength, useMultipart = false } = options;
+    const { mount, db, filename, contentType, contentLength } = options;
 
     return handleFsError(
       async () => {
-        // 构建最终的S3路径
+        // 1. 规范化最终 Key
         let finalS3Path;
-        // 智能检查s3SubPath是否已经包含完整的文件路径
         const { isCompleteFilePath } = await import("../utils/S3PathUtils.js");
         if (s3SubPath && isCompleteFilePath(s3SubPath, filename)) {
           finalS3Path = s3SubPath;
@@ -134,75 +59,167 @@ export class S3UploadOperations {
 
         let result;
         let etag;
+        const progressId = options.uploadId || finalS3Path;
 
-        if (useMultipart) {
-          // 使用AWS SDK Upload类进行流式分片上传
-          const { Upload } = await import("@aws-sdk/lib-storage");
+        // 2. 构造适配当前环境的 Body，并统一使用 Upload（lib-storage）
+        const { Upload } = await import("@aws-sdk/lib-storage");
+        const uploadConfig = getEnvironmentOptimizedUploadConfig();
+        console.log(
+          `[StorageUpload] type=S3 mode=流式分片 status=开始 路径=${finalS3Path}`
+        );
 
-          // 获取环境自适应的上传配置
-          const uploadConfig = getEnvironmentOptimizedUploadConfig();
+        /** @type {any} */
+        let bodyForUpload = stream;
 
-          console.log(`S3流式分片上传 - 环境: ${uploadConfig.environment}, 分片: ${uploadConfig.partSize / 1024 / 1024}MB, 并发: ${uploadConfig.queueSize}`);
-
-          const upload = new Upload({
-            client: this.s3Client,
-            params: {
-              Bucket: this.config.bucket_name,
-              Key: finalS3Path,
-              Body: stream,
-              ContentType: contentType,
-            },
-            queueSize: uploadConfig.queueSize,
-            partSize: uploadConfig.partSize,
-            leavePartsOnError: false, // 出错时自动清理分片
-          });
-
-          // 监听上传进度
-          let lastProgressLog = 0;
-          upload.on("httpUploadProgress", (progress) => {
-            const { loaded = 0, total = contentLength } = progress;
-
-            // 每50MB记录一次进度，与成功代码完全相同
-            const REDUCED_LOG_INTERVAL = 50 * 1024 * 1024; // 50MB
-            if (loaded - lastProgressLog >= REDUCED_LOG_INTERVAL || loaded === total) {
-              const progressMB = (loaded / (1024 * 1024)).toFixed(2);
-              const totalMB = total > 0 ? (total / (1024 * 1024)).toFixed(2) : "未知";
-              const percentage = total > 0 ? ((loaded / total) * 100).toFixed(1) : "未知";
-              console.log(`WebDAV PUT - 流式上传进度: ${progressMB}MB / ${totalMB}MB (${percentage}%)`);
-              lastProgressLog = loaded;
+        // 在 Node.js/Docker 环境中，如果收到的是 Web ReadableStream，
+        // 使用 Readable.fromWeb 转换为 Node.js Readable 流式。
+        if (isNodeJSEnvironment() && stream && typeof stream.getReader === "function") {
+          try {
+            const { Readable } = await import("stream");
+            if (typeof Readable.fromWeb === "function") {
+              bodyForUpload = Readable.fromWeb(stream);
             }
-          });
+          } catch (e) {
+            console.warn("S3 流式上传: Readable.fromWeb 转换失败，回退为原始流:", e?.message || e);
+            bodyForUpload = stream;
+          }
+        }
 
-          // 执行上传
-          const startTime = Date.now();
-          result = await upload.done();
-          const duration = Date.now() - startTime;
-          const speedMBps = contentLength > 0 ? (contentLength / 1024 / 1024 / (duration / 1000)).toFixed(2) : "未知";
-
-          console.log(`WebDAV PUT - 流式上传完成，用时: ${duration}ms，平均速度: ${speedMBps}MB/s`);
-
-          etag = result.ETag ? result.ETag.replace(/"/g, "") : undefined;
-        } else {
-          // 使用PutObjectCommand进行直接流式上传
-          console.log(`WebDAV PUT [${filename}]: 开始直接上传 (${(contentLength / 1024 / 1024).toFixed(1)}MB)`);
-
-          // 处理AWS SDK v3在Node.js环境中的ReadableStream兼容性问题
-          const compatibleStream = await convertStreamForAWSCompatibility(stream);
-
-          const putCommand = new PutObjectCommand({
+        const upload = new Upload({
+          client: this.s3Client,
+          params: {
             Bucket: this.config.bucket_name,
             Key: finalS3Path,
-            Body: compatibleStream,
+            Body: bodyForUpload,
             ContentType: contentType,
-            ContentLength: contentLength > 0 ? contentLength : undefined,
-          });
+          },
+          queueSize: uploadConfig.queueSize,
+          partSize: uploadConfig.partSize,
+          leavePartsOnError: false,
+        });
 
-          result = await this.s3Client.send(putCommand);
+        // 3. 只从 Upload 的 httpUploadProgress 里拿整体进度
+        let lastProgressLog = 0;
+        upload.on("httpUploadProgress", (progress) => {
+          const { loaded = 0, total = contentLength } = progress;
+          const REDUCED_LOG_INTERVAL = 50 * 1024 * 1024;
+          const shouldLog = total > 0 ? loaded === total || loaded - lastProgressLog >= REDUCED_LOG_INTERVAL : loaded - lastProgressLog >= REDUCED_LOG_INTERVAL;
 
-          etag = result.ETag ? result.ETag.replace(/"/g, "") : undefined;
+          if (shouldLog) {
+            const progressMB = (loaded / (1024 * 1024)).toFixed(2);
+            const totalMB = total > 0 ? (total / (1024 * 1024)).toFixed(2) : "未知";
+            const percentage = total > 0 ? ((loaded / total) * 100).toFixed(1) : "未知";
+            console.log(
+              `[StorageUpload] type=S3 mode=流式分片 status=进度 已传=${progressMB}MB 总=${totalMB}MB 进度=${percentage}% 路径=${finalS3Path}`
+            );
+            lastProgressLog = loaded;
+          }
 
-          console.log(`WebDAV PUT [${filename}]: 直接上传完成 100%`);
+          try {
+            updateUploadProgress(progressId, {
+              loaded,
+              total,
+              path: finalS3Path,
+              storageType: "S3",
+            });
+          } catch {}
+        });
+
+        // 4. 等 Upload 完成，然后统一做目录更新时间等收尾
+        const startTime = Date.now();
+        result = await upload.done();
+        const duration = Date.now() - startTime;
+        const speedMBps = contentLength > 0 ? (contentLength / 1024 / 1024 / (duration / 1000)).toFixed(2) : "未知";
+
+        console.log(
+          `[StorageUpload] type=S3 mode=流式分片 status=完成 用时=${duration}ms 速度=${speedMBps}MB/s 路径=${finalS3Path}`
+        );
+        etag = result.ETag ? result.ETag.replace(/"/g, "") : undefined;
+
+        await updateParentDirectoriesModifiedTime(this.s3Client, this.config.bucket_name, finalS3Path);
+        if (db && mount && mount.id) {
+          await updateMountLastUsed(db, mount.id);
         }
+
+        const s3Url = buildS3Url(this.config, finalS3Path);
+
+        console.log(
+          `[StorageUpload] type=S3 mode=流式分片 status=成功 路径=${finalS3Path}`
+        );
+        return {
+          success: true,
+          message: "S3_STREAM_UPLOAD",
+          storagePath: finalS3Path,
+          publicUrl: s3Url,
+          etag,
+          contentType,
+        };
+      },
+      "流式上传",
+      "流式上传失败"
+    );
+  }
+
+  /**
+   * 表单上传（一次性读取全部数据）
+   * @param {string} s3SubPath - S3子路径
+   * @param {File|Blob|Uint8Array|ArrayBuffer|Buffer|string} data - 完整数据源
+   * @param {Object} options - 选项参数
+   * @returns {Promise<Object>} 上传结果
+   */
+  async uploadForm(s3SubPath, data, options = {}) {
+    const { mount, db, filename, contentType } = options;
+
+    return handleFsError(
+      async () => {
+        // 构建最终的S3路径
+        let finalS3Path;
+        const { isCompleteFilePath } = await import("../utils/S3PathUtils.js");
+        if (s3SubPath && isCompleteFilePath(s3SubPath, filename)) {
+          finalS3Path = s3SubPath;
+        } else if (s3SubPath && !s3SubPath.endsWith("/")) {
+          finalS3Path = s3SubPath + "/" + filename;
+        } else {
+          finalS3Path = s3SubPath + filename;
+        }
+
+        // 推断 MIME 类型
+        const effectiveContentType = contentType || getMimeTypeFromFilename(filename);
+
+        // 规范化 Body 与长度
+        let body;
+        let size = 0;
+
+        if (typeof Buffer !== "undefined" && Buffer.isBuffer(data)) {
+          body = data;
+          size = data.length;
+        } else if (data instanceof Uint8Array) {
+          body = data;
+          size = data.byteLength;
+        } else if (data instanceof ArrayBuffer) {
+          body = new Uint8Array(data);
+          size = body.byteLength;
+        } else if (data && typeof data.arrayBuffer === "function") {
+          const buf = await data.arrayBuffer();
+          body = new Uint8Array(buf);
+          size = body.byteLength;
+        } else if (typeof data === "string") {
+          body = typeof Buffer !== "undefined" ? Buffer.from(data) : new TextEncoder().encode(data);
+          size = body.length ?? body.byteLength ?? 0;
+        } else {
+          throw new ValidationError("不支持的表单上传数据类型");
+        }
+
+        const putParams = {
+          Bucket: this.config.bucket_name,
+          Key: finalS3Path,
+          Body: body,
+          ContentType: effectiveContentType,
+          ContentLength: size,
+        };
+
+        const putCommand = new PutObjectCommand(putParams);
+        const result = await this.s3Client.send(putCommand);
 
         // 更新父目录的修改时间
         await updateParentDirectoriesModifiedTime(this.s3Client, this.config.bucket_name, finalS3Path);
@@ -212,20 +229,22 @@ export class S3UploadOperations {
           await updateMountLastUsed(db, mount.id);
         }
 
-        // 构建公共URL
         const s3Url = buildS3Url(this.config, finalS3Path);
 
+        console.log(
+          `[StorageUpload] type=S3 mode=表单上传 status=成功 路径=${finalS3Path} 大小=${size}`
+        );
         return {
           success: true,
-          message: useMultipart ? "流式分片上传成功" : "流式直接上传成功",
+          message: "S3_FORM_UPLOAD",
           storagePath: finalS3Path,
           publicUrl: s3Url,
-          etag: etag,
-          contentType: contentType,
+          etag: result.ETag ? result.ETag.replace(/\"/g, "") : null,
+          contentType: effectiveContentType,
         };
       },
-      "流式上传",
-      "流式上传失败"
+      "表单上传",
+      "表单上传失败"
     );
   }
 
@@ -235,7 +254,7 @@ export class S3UploadOperations {
    * @param {Object} options - 选项参数
    * @returns {Promise<Object>} 预签名上传URL信息
    */
-  async generatePresignedUploadUrl(s3SubPath, options = {}) {
+  async generateUploadUrl(s3SubPath, options = {}) {
     const { fileName, fileSize, expiresIn = 3600 } = options;
 
     return handleFsError(
@@ -243,10 +262,22 @@ export class S3UploadOperations {
         // 推断MIME类型
         const contentType = getMimeTypeFromFilename(fileName);
 
-        const presignedUrl = await generatePresignedPutUrl(this.config, s3SubPath, contentType, this.encryptionSecret, expiresIn);
+        // 构建最终的 S3 对象 Key（与直接上传逻辑保持一致）
+        let finalS3Path;
+        const { isCompleteFilePath } = await import("../utils/S3PathUtils.js");
+        if (s3SubPath && isCompleteFilePath(s3SubPath, fileName)) {
+          // s3SubPath 已包含完整文件路径
+          finalS3Path = s3SubPath;
+        } else if (s3SubPath && !s3SubPath.endsWith("/")) {
+          finalS3Path = `${s3SubPath}/${fileName}`;
+        } else {
+          finalS3Path = `${s3SubPath || ""}${fileName}`;
+        }
 
-        // 生成S3直接访问URL
-        const s3Url = buildS3Url(this.config, s3SubPath);
+        const presignedUrl = await generateUploadUrl(this.config, finalS3Path, contentType, this.encryptionSecret, expiresIn);
+
+        // 生成 S3 直接访问 URL
+        const s3Url = buildS3Url(this.config, finalS3Path);
 
         return {
           success: true,
@@ -254,7 +285,7 @@ export class S3UploadOperations {
           publicUrl: s3Url,
           contentType: contentType,
           expiresIn: expiresIn,
-          storagePath: s3SubPath,
+          storagePath: finalS3Path,
           fileName: fileName,
           fileSize: fileSize,
         };
@@ -373,7 +404,22 @@ export class S3UploadOperations {
    * @returns {Promise<Object>} 初始化结果
    */
   async initializeFrontendMultipartUpload(s3SubPath, options = {}) {
-    const { fileName, fileSize, partSize = 5 * 1024 * 1024, partCount, mount, db } = options;
+    const {
+      fileName,
+      fileSize,
+      partSize = 5 * 1024 * 1024,
+      partCount,
+      mount,
+      db,
+      userIdOrInfo,
+      userType,
+    } = options;
+
+    console.log("[S3UploadOperations] 初始化分片上传", {
+      fileName,
+      fileSize,
+      mountId: mount?.id,
+    });
 
     return handleFsError(
       async () => {
@@ -397,6 +443,61 @@ export class S3UploadOperations {
           finalS3Path = s3SubPath + fileName;
         }
 
+        // 基本参数校验
+        if (
+          !fileName ||
+          typeof fileSize !== "number" ||
+          !Number.isFinite(fileSize) ||
+          fileSize <= 0
+        ) {
+          throw new ValidationError("S3 分片上传初始化失败：缺少有效的 fileName 或 fileSize");
+        }
+
+        // S3 官方约束：
+        // - 单个对象最大 5TB
+        // - 单个分片最小 5MB（最后一片可以更小）
+        // - 单个分片最大 5GB
+        // - 分片总数最多 10000
+        const MIN_PART_SIZE = 5 * 1024 * 1024; // 5MB
+        const MAX_PART_SIZE = 5 * 1024 * 1024 * 1024; // 5GB
+        const MAX_PARTS = 10000;
+        const MAX_OBJECT_SIZE = MAX_PART_SIZE * MAX_PARTS; // 5GB * 10000 = 5TB
+
+        if (fileSize > MAX_OBJECT_SIZE) {
+          throw new ValidationError(
+            "S3 分片上传初始化失败：文件大小超过 S3 单对象最大限制（约 5TB）",
+          );
+        }
+
+        // 计算基础分片大小：
+        // - 如果调用方显式传入 partSize，则在合法范围内 clamp；
+        // - 否则按文件大小自动推导：ceil(fileSize / MAX_PARTS)，再 clamp 到 [MIN_PART_SIZE, MAX_PART_SIZE]。
+        let basePartSize;
+        if (Number.isFinite(partSize) && partSize > 0) {
+          basePartSize = Number(partSize);
+        } else {
+          basePartSize = Math.ceil(fileSize / MAX_PARTS);
+        }
+
+        if (!Number.isFinite(basePartSize) || basePartSize < MIN_PART_SIZE) {
+          basePartSize = MIN_PART_SIZE;
+        }
+        if (basePartSize > MAX_PART_SIZE) {
+          basePartSize = MAX_PART_SIZE;
+        }
+
+        const effectivePartSize = basePartSize;
+        const estimatedParts = partCount || Math.ceil(fileSize / effectivePartSize);
+
+        if (!Number.isFinite(estimatedParts) || estimatedParts <= 0) {
+          throw new ValidationError("S3 分片上传初始化失败：无法计算分片数量");
+        }
+        if (estimatedParts > MAX_PARTS) {
+          throw new ValidationError(
+            `S3 分片上传初始化失败：分片数量超过上限（${MAX_PARTS}），请增大分片大小或限制文件尺寸`,
+          );
+        }
+
         // 创建分片上传
         const { CreateMultipartUploadCommand } = await import("@aws-sdk/client-s3");
         const createCommand = new CreateMultipartUploadCommand({
@@ -409,9 +510,9 @@ export class S3UploadOperations {
         const uploadId = createResponse.UploadId;
 
         // 计算分片数量
-        const calculatedPartCount = partCount || Math.ceil(fileSize / partSize);
+        const calculatedPartCount = estimatedParts;
 
-        // 生成预签名URL列表
+        // 生成预签名URL列表（per_part_url 策略下的分片端点）
         const presignedUrls = [];
         const { UploadPartCommand } = await import("@aws-sdk/client-s3");
 
@@ -439,13 +540,80 @@ export class S3UploadOperations {
           await updateMountLastUsed(db, mount.id);
         }
 
+        // 记录到通用 upload_sessions 表（控制面会话），便于统一管理与 UI 展示
+        if (db && mount?.storage_config_id) {
+          try {
+            // 规范化 FS 视图路径：mount_path + s3SubPath
+            let fsPath = s3SubPath || "";
+            if (mount.mount_path) {
+              const basePath = (mount.mount_path || "").replace(/\/+$/g, "") || "/";
+              const rel = (s3SubPath || "").replace(/^\/+/g, "");
+              fsPath = rel ? `${basePath}/${rel}` : basePath;
+            }
+            if (!fsPath.startsWith("/")) {
+              fsPath = `/${fsPath}`;
+            }
+
+            const fingerprint = computeUploadSessionFingerprintMetaV1({
+              userIdOrInfo,
+              userType: userType || null,
+              storageType: "S3",
+              storageConfigId: mount.storage_config_id,
+              mountId: mount.id ?? null,
+              fsPath,
+              fileName,
+              fileSize,
+            });
+
+            const sessionPayload = {
+              userIdOrInfo,
+              userType: userType || null,
+              storageType: "S3",
+              storageConfigId: mount.storage_config_id,
+              mountId: mount.id ?? null,
+              fsPath,
+              source: "FS",
+              fileName,
+              fileSize,
+              mimeType: contentType || null,
+              checksum: null,
+              fingerprintAlgo: fingerprint.algo,
+              fingerprintValue: fingerprint.value,
+              strategy: "per_part_url",
+              partSize: effectivePartSize,
+              totalParts: calculatedPartCount,
+              bytesUploaded: 0,
+              uploadedParts: 0,
+              nextExpectedRange: null,
+              // 对于 S3，用 UploadId 作为 provider 会话标识，同时写入 upload_url 字段以复用现有工具函数
+              providerUploadId: uploadId,
+              providerUploadUrl: uploadId,
+              providerMeta: null,
+              status: "active",
+              expiresAt: null,
+            };
+
+            await createUploadSessionRecord(db, sessionPayload);
+          } catch (e) {
+            console.warn(
+              "[S3UploadOperations] 创建 upload_sessions 记录失败，将不影响分片上传流程:",
+              e,
+            );
+          }
+        }
+
         return {
+          // 通用字段
           uploadId: uploadId,
+          strategy: "per_part_url",
+          fileName,
+          fileSize,
+          partSize: effectivePartSize,
+          partCount: calculatedPartCount,
+          // S3 专用字段
           bucket: this.config.bucket_name,
           key: finalS3Path,
-          partSize: partSize,
-          partCount: calculatedPartCount,
-          presignedUrls: presignedUrls,
+          presignedUrls,
           mount_id: mount ? mount.id : null,
           path: mount ? mount.mount_path + s3SubPath : s3SubPath,
           storage_type: mount ? mount.storage_type : "S3",
@@ -463,7 +631,13 @@ export class S3UploadOperations {
    * @returns {Promise<Object>} 完成结果
    */
   async completeFrontendMultipartUpload(s3SubPath, options = {}) {
-    const { uploadId, parts, fileName, fileSize, mount, db } = options;
+    const { uploadId, parts, fileName, fileSize, mount, db, userIdOrInfo, userType } = options;
+
+    console.log("[S3UploadOperations] 完成分片上传", {
+      fileName,
+      fileSize,
+      mountId: mount?.id,
+    });
 
     return handleFsError(
       async () => {
@@ -522,7 +696,54 @@ export class S3UploadOperations {
         // 构建公共URL
         const s3Url = buildS3Url(this.config, finalS3Path);
 
-        // 文件上传完成，无需数据库操作
+        // 文件上传完成后，尽量更新通用 upload_sessions 状态（不影响主流程）
+        if (db && mount?.storage_config_id && uploadId) {
+          try {
+            // 重新计算与初始化阶段一致的 FS 视图路径与指纹
+            let fsPath = s3SubPath || "";
+            if (mount.mount_path) {
+              const basePath = (mount.mount_path || "").replace(/\/+$/g, "") || "/";
+              const rel = (s3SubPath || "").replace(/^\/+/g, "");
+              fsPath = rel ? `${basePath}/${rel}` : basePath;
+            }
+            if (!fsPath.startsWith("/")) {
+              fsPath = `/${fsPath}`;
+            }
+
+            const fingerprint = computeUploadSessionFingerprintMetaV1({
+              userIdOrInfo,
+              userType,
+              storageType: "S3",
+              storageConfigId: mount.storage_config_id,
+              mountId: mount.id ?? null,
+              fsPath,
+              fileName,
+              fileSize,
+            });
+
+            await updateUploadSessionStatusByFingerprint(db, {
+              userIdOrInfo,
+              userType,
+              storageType: "S3",
+              storageConfigId: mount.storage_config_id,
+              mountId: mount.id ?? null,
+              fsPath,
+              fileName,
+              fileSize,
+              status: "completed",
+              bytesUploaded: fileSize,
+              uploadedParts: Array.isArray(sortedParts) ? sortedParts.length : null,
+              nextExpectedRange: null,
+              errorCode: null,
+              errorMessage: null,
+            });
+          } catch (e) {
+            console.warn(
+              "[S3UploadOperations] 更新 upload_sessions 状态为 completed 失败:",
+              e,
+            );
+          }
+        }
 
         return {
           success: true,
@@ -548,7 +769,7 @@ export class S3UploadOperations {
    * @returns {Promise<Object>} 中止结果
    */
   async abortFrontendMultipartUpload(s3SubPath, options = {}) {
-    const { uploadId, fileName, mount, db } = options;
+    const { uploadId, fileName, mount, db, userIdOrInfo, userType } = options;
 
     return handleFsError(
       async () => {
@@ -589,6 +810,45 @@ export class S3UploadOperations {
         // 更新最后使用时间
         if (db && mount && mount.id) {
           await updateMountLastUsed(db, mount.id);
+        }
+
+        // 更新 upload_sessions 状态为 aborted（不影响主流程）
+        if (db && mount?.storage_config_id && uploadId) {
+          try {
+            // 通过 UploadId 查找会话记录，再按指纹进行统一更新
+            const sessionRow = await findUploadSessionByUploadUrl(db, {
+              uploadUrl: uploadId,
+              storageType: "S3",
+              userIdOrInfo,
+              userType,
+            });
+
+            if (sessionRow) {
+              await updateUploadSessionStatusByFingerprint(db, {
+                userIdOrInfo,
+                userType,
+                storageType: "S3",
+                storageConfigId: sessionRow.storage_config_id,
+                mountId: sessionRow.mount_id ?? mount.id ?? null,
+                fsPath: sessionRow.fs_path,
+                fileName: sessionRow.file_name,
+                fileSize: sessionRow.file_size,
+                status: "aborted",
+                errorCode: null,
+                errorMessage: "aborted_by_client",
+              });
+            } else {
+              console.warn(
+                "[S3UploadOperations] 未找到对应的 upload_sessions 记录（abort），uploadId:",
+                uploadId,
+              );
+            }
+          } catch (e) {
+            console.warn(
+              "[S3UploadOperations] 更新 upload_sessions 状态为 aborted 失败:",
+              e,
+            );
+          }
         }
 
         return {
@@ -755,9 +1015,10 @@ export class S3UploadOperations {
 
         return {
           success: true,
-          uploadId: uploadId,
-          presignedUrls: presignedUrls,
-          expiresIn: expiresIn,
+          uploadId,
+          strategy: "per_part_url",
+          presignedUrls,
+          expiresIn,
         };
       },
       "刷新分片上传预签名URL",

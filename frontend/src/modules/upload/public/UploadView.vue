@@ -17,9 +17,11 @@
     <div class="main-content" v-if="hasPermission">
       <!-- 文件上传区域 -->
       <div class="card mb-6 p-4 sm:p-6">
-        <FileUploader
+        <UppyShareUploader
           :dark-mode="darkMode"
+          :loading="loadingFiles"
           :is-admin="isAdmin"
+          :storage-configs="storageConfigsStore.sortedConfigs"
           @upload-success="handleUploadSuccess"
           @upload-error="handleUploadError"
           @share-results="handleShareResults"
@@ -92,7 +94,7 @@
 <script setup>
 import { ref, onMounted, computed } from "vue";
 import { storeToRefs } from "pinia";
-import FileUploader from "@/modules/upload/public/components/FileUploader.vue";
+import UppyShareUploader from "@/modules/upload/public/components/UppyShareUploader.vue";
 import FileList from "@/modules/upload/public/components/FileList.vue";
 import PermissionManager from "@/components/common/PermissionManager.vue";
 import ShareLinkBox from "@/components/common/ShareLinkBox.vue";
@@ -102,6 +104,7 @@ import { useAuthStore } from "@/stores/authStore.js";
 import { useStorageConfigsStore } from "@/stores/storageConfigsStore.js";
 import { useUploadService } from "@/modules/upload/services/uploadService.js";
 import { useGlobalMessage } from "@/composables/core/useGlobalMessage.js";
+import { useThemeMode } from "@/composables/core/useThemeMode.js";
 
 const { t } = useI18n(); // 初始化i18n
 const { getRecentFiles } = useUploadService();
@@ -109,14 +112,9 @@ const { showSuccess, showError, showWarning } = useGlobalMessage();
 
 // 使用认证Store
 const authStore = useAuthStore();
-const { isAdmin, hasFilePermission, hasFileManagePermission } = storeToRefs(authStore);
+const { isAdmin, hasFileSharePermission, hasFileManagePermission } = storeToRefs(authStore);
 
-const props = defineProps({
-  darkMode: {
-    type: Boolean,
-    default: false,
-  },
-});
+const { isDarkMode: darkMode } = useThemeMode();
 
 // 数据状态
 const storageConfigsStore = useStorageConfigsStore();
@@ -134,8 +132,8 @@ const shareListContainerClass = computed(() => {
 const showShareQrModal = ref(false);
 const currentShareLink = ref("");
 
-// 从Store获取权限状态的计算属性
-const hasPermission = computed(() => hasFilePermission.value);
+// 从Store获取权限状态的计算属性（文件上传 = FILE_SHARE）
+const hasPermission = computed(() => hasFileSharePermission.value);
 const canLoadRecentFiles = computed(() => hasFileManagePermission.value);
 
 // 计算最近3条记录

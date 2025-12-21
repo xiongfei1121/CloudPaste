@@ -3,16 +3,13 @@
  * 处理文件分享的查看、下载、预览功能
  */
 import { Hono } from "hono";
-import { useRepositories } from "../utils/repositories.js";
 import { getEncryptionSecret } from "../utils/environmentUtils.js";
-import { verifyPassword } from "../utils/crypto.js";
-import { generateFileDownloadUrl } from "../services/fileService.js";
-import { isOfficeFile } from "../utils/fileUtils.js";
-import { handleFileDownload } from "../services/fileViewService.js";
+import { handleFileDownload, checkAndDeleteExpiredFile } from "../services/fileViewService.js";
 import { getFileBySlug, isFileAccessible } from "../services/fileService.js";
+import { useRepositories } from "../utils/repositories.js";
 import { ApiStatus } from "../constants/index.js";
-import { AppError, NotFoundError, AuthenticationError, AuthorizationError, ValidationError, DriverError } from "../http/errors.js";
-import { jsonOk } from "../utils/common.js";
+import { AppError, AuthorizationError, NotFoundError } from "../http/errors.js";
+import { verifyPassword } from "../utils/crypto.js";
 
 const app = new Hono();
 
@@ -20,83 +17,67 @@ const app = new Hono();
 // 路由处理器
 // ==========================================
 
-// 处理API路径下的文件下载请求 /api/file-download/:slug
-app.get("/api/file-download/:slug", async (c) => {
+/**
+ * Share 内容交付统一入口
+ * - 负责密码/过期/可访问性校验
+ * - 最终委托 FileViewService 进行直链/代理决策与数据流输出
+ */
+async function handleShareDelivery(c, { forceDownload, forceProxy }) {
   const slug = c.req.param("slug");
   const db = c.env.DB;
   const encryptionSecret = getEncryptionSecret(c);
   const repositoryFactory = useRepositories(c);
-  return handleFileDownload(slug, db, encryptionSecret, c.req.raw, true, repositoryFactory); // 强制下载
-});
 
-// 处理API路径下的文件预览请求 /api/file-view/:slug
-app.get("/api/file-view/:slug", async (c) => {
-  const slug = c.req.param("slug");
-  const db = c.env.DB;
-  const encryptionSecret = getEncryptionSecret(c);
-  const repositoryFactory = useRepositories(c);
-  return handleFileDownload(slug, db, encryptionSecret, c.req.raw, false, repositoryFactory); // 预览
-});
-
-// 处理Office文件直接预览URL请求 /api/office-preview/:slug
-app.get("/api/office-preview/:slug", async (c) => {
-  const slug = c.req.param("slug");
-  const db = c.env.DB;
-  const encryptionSecret = getEncryptionSecret(c);
-
-  // 查询文件详情
+  // 统一从文件记录出发做密码与过期校验，避免直链路径绕过密码保护
   const file = await getFileBySlug(db, slug, encryptionSecret);
   if (!file) {
     throw new NotFoundError("文件不存在");
   }
 
-  // 校验密码
+  const url = new URL(c.req.url);
+  const passwordParam = url.searchParams.get("password");
+
   if (file.password) {
-    const url = new URL(c.req.url);
-    const passwordParam = url.searchParams.get("password");
     if (!passwordParam) {
-      throw new AuthenticationError("需要密码访问此文件");
+      throw new AuthorizationError("需要密码访问此文件");
     }
-    const passwordValid = await verifyPassword(passwordParam, file.password);
-    if (!passwordValid) {
-      throw new AuthenticationError("密码错误");
+    const valid = await verifyPassword(passwordParam, file.password);
+    if (!valid) {
+      throw new AuthorizationError("密码不正确");
     }
   }
 
   const accessCheck = await isFileAccessible(db, file, encryptionSecret);
   if (!accessCheck.accessible) {
     if (accessCheck.reason === "expired") {
+      await checkAndDeleteExpiredFile(db, file, encryptionSecret, repositoryFactory);
       throw new AppError("文件已过期", { status: ApiStatus.GONE, code: "GONE", expose: true });
     }
     throw new AuthorizationError("文件不可访问");
   }
 
-  if (!isOfficeFile(file.mimetype, file.filename)) {
-    throw new ValidationError("不是Office文件类型");
-  }
-
-  if (!file.storage_config_id || !file.storage_path || !file.storage_type) {
-    throw new NotFoundError("文件存储信息不完整");
-  }
-
-  // 统一依赖通用 URL 生成逻辑，无存储类型分支
-
-  if (file.max_views && file.max_views > 0 && file.views >= file.max_views) {
-    throw new AppError("文件已达到最大查看次数", { status: ApiStatus.GONE, code: "GONE", expose: true });
-  }
-
-  const urlsObj = await generateFileDownloadUrl(db, file, encryptionSecret, c.req.raw).catch((error) => {
-    console.error("生成Office预览URL失败:", error);
-    throw new DriverError("生成预览URL失败", { details: { cause: error?.message } });
+  return handleFileDownload(slug, db, encryptionSecret, c.req.raw, forceDownload, repositoryFactory, {
+    forceProxy: !!forceProxy,
   });
-  const presignedUrl = urlsObj?.previewUrl;
+}
 
-  return jsonOk(c, {
-    url: presignedUrl,
-    filename: file.filename,
-    mimetype: file.mimetype,
-    is_temporary: true,
-  }, "获取预览URL成功");
+// Share 本地代理入口 /api/s/:slug（等价 FS 的 /api/p）
+// - 永远同源本地流式 200，不做直链/Worker 决策
+// - down=true/1 表示下载语义，否则为预览语义
+app.get("/api/s/:slug", async (c) => {
+  const url = new URL(c.req.url);
+  const down = url.searchParams.get("down");
+  const legacyMode = url.searchParams.get("mode");
+  const forceDownload =
+    (down && down !== "0" && down !== "false") ||
+    legacyMode === "attachment" ||
+    legacyMode === "download";
+  return handleShareDelivery(c, { forceDownload, forceProxy: true });
+});
+
+// Share 文本/编码检测专用同源内容口（共用）
+app.get("/api/share/content/:slug", async (c) => {
+  return handleShareDelivery(c, { forceDownload: false, forceProxy: true });
 });
 
 export default app;

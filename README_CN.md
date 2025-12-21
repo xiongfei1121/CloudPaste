@@ -65,9 +65,10 @@
 
 ### 📤 文件上传与管理
 
-- **多存储支持**：兼容多种 S3 存储服务 (Cloudflare R2、Backblaze B2、AWS S3 等)
+- **多存储支持**：对象存储（S3 兼容：Cloudflare R2、Backblaze B2、AWS S3、阿里云 OSS、腾讯 COS 等）、WebDAV、本地文件系统、OneDrive、Google Drive、GitHub Releases（只读挂载）
 - **存储配置**：可视化界面配置多个存储空间，灵活切换默认存储源
-- **高效上传**：通过预签名 URL 直接上传至 S3 存储，多文件上传
+- **挂载点**：将多个存储统一为文件系统路径，通过挂载浏览器按目录访问
+- **高效上传**：支持多种上传方式，包括前端预签名直传存储和分片断点续传的对接；其余走流式上传等多种选择
 - **实时反馈**：上传进度实时显示
 - **自定义限制**：单次上传限制和最大容量限制
 - **元数据管理**：文件备注、密码、过期时间、访问限制
@@ -86,20 +87,14 @@
 - **WebDAV 协议支持**：通过标准 WebDAV 协议访问和管理文件系统
 - **网络驱动器挂载**：支持 部分第三方客户端直接挂载
 - **灵活的挂载点**：支持创建多个挂载点，连接不同的存储服务
+- **本地代理**：可通过本地代理进行预览/下载走同源代理(cf部署即为cf代理)
+- **外部反代**：可将预览/下载数据面流量交给 `Cloudpaste-Proxy.js`（Worker/VPS/边缘运行时）转发
+- **缓存 TTL**：挂载点支持控制目录/元信息缓存，降低上游请求次数
 - **权限控制**：精细的挂载点访问权限管理
 - **API 密钥集成**：通过 API 密钥授权 WebDAV 访问
-- **大文件支持**：自动使用分片上传机制处理大文件
 - **目录操作**：完整支持目录创建、上传、删除、重命名等操作
 
 ### 🔐 轻量权限管理
-
-#### 管理员权限控制
-
-- **系统管理**：全局系统设置配置
-- **内容审核**：所有用户内容的管理
-- **存储管理**：S3 存储服务的添加、编辑与删除
-- **权限分配**：API 密钥的创建与权限管理
-- **数据分析**：完整的统计数据访问
 
 #### API 密钥权限控制
 
@@ -117,6 +112,7 @@
 - **视觉模式**：明亮/暗黑主题切换
 - **安全认证**：基于 JWT 的管理员认证系统
 - **离线体验**：PWA 支持，可离线使用和安装到桌面
+- **定时任务**：后台定时调度（Docker/Node 环境），支持 interval/cron 配置；内置清理分片上传会话、存储同步；
 
 ## 🚀 部署教程
 
@@ -128,10 +124,10 @@
 - [ ] 如使用 R2：开通 **Cloudflare R2** 服务并创建存储桶（需绑定支付方式）
 - [ ] 如使用 Vercel：注册 [Vercel](https://vercel.com) 账号
 - [ ] 其他 S3 存储服务的配置信息：
-   - `S3_ACCESS_KEY_ID`
-   - `S3_SECRET_ACCESS_KEY`
-   - `S3_BUCKET_NAME`
-   - `S3_ENDPOINT`
+    - `S3_ACCESS_KEY_ID`
+    - `S3_SECRET_ACCESS_KEY`
+    - `S3_BUCKET_NAME`
+    - `S3_ENDPOINT`
 
 **以下教程可能过时 具体参考： [Cloudpaste 在线部署文档](https://doc.cloudpaste.qzz.io)**
 
@@ -140,83 +136,251 @@
 
 ### 📑 目录
 
-- [Action 自动部署](#Action自动部署:)
-   - [后端自动部署](#后端自动部署)
-   - [前端自动部署](#前端自动部署)
-- [手动部署](#手动部署:)
-   - [后端手动部署](#后端手动部署)
-   - [前端手动部署](#前端手动部署)
+- [Action 自动部署](#Action自动部署)
+    - [部署架构选择](#部署架构选择)
+    - [配置 GitHub 仓库](#配置-GitHub-仓库)
+    - [一体化部署教程（推荐）](#一体化部署教程推荐)
+    - [前后端分离部署教程](#前后端分离部署教程)
+- [手动部署](#手动部署)
+    - [一体化手动部署（推荐）](#一体化手动部署推荐)
+    - [前后端分离手动部署](#前后端分离手动部署)
 - [ClawCloud 部署 CloudPaste 教程](#ClawCloud部署CloudPaste教程)
 
 ---
 
-## Action 自动部署:
+## Action 自动部署
 
-使用 GitHub Actions 可以实现代码推送后自动部署应用。
+使用 GitHub Actions 可以实现代码推送后自动部署应用。CloudPaste 提供两种部署架构供您选择。
+
+### 部署架构选择
+
+#### 🔄 一体化部署（推荐）
+
+**前后端部署在同一个 Cloudflare Worker 上**
+
+✨ **优势：**
+- **前后端同源** - 无跨域问题，配置更简单
+- **成本更低** - 导航请求不计费，相比分离部署节省 60%+ 成本
+- **部署更简单** - 一次部署完成前后端，无需管理多个服务
+- **性能更好** - 前后端在同一 Worker，响应速度更快
+
+#### 🔀 前后端分离部署
+
+**后端部署到 Cloudflare Workers，前端部署到 Cloudflare Pages**
+
+✨ **优势：**
+- **灵活管理** - 前后端独立部署，互不影响
+- **团队协作** - 前后端可由不同团队维护
+- **扩展性强** - 前端可轻松切换到其他平台（如 Vercel）
+
+---
 
 ### 配置 GitHub 仓库
 
-1. Fork 或克隆仓库 [https://github.com/ling-drag0n/CloudPaste](https://github.com/ling-drag0n/CloudPaste)
-2. 进入您的 GitHub 仓库设置
-3. 转到 Settings → Secrets and variables → Actions → New Repository secrets
-4. 添加以下 Secrets：
+#### 1️⃣ Fork 或克隆仓库
+
+访问并 Fork 仓库：[https://github.com/ling-drag0n/CloudPaste](https://github.com/ling-drag0n/CloudPaste)
+
+#### 2️⃣ 配置 GitHub Secrets
+
+进入您的 GitHub 仓库设置：**Settings** → **Secrets and variables** → **Actions** → **New repository secret**
+
+添加以下 Secrets：
 
 | Secret 名称             | 必需 | 用途                                                  |
 | ----------------------- | ---- | ----------------------------------------------------- |
 | `CLOUDFLARE_API_TOKEN`  | ✅   | Cloudflare API 令牌（需要 Workers、D1 和 Pages 权限） |
 | `CLOUDFLARE_ACCOUNT_ID` | ✅   | Cloudflare 账户 ID                                    |
 | `ENCRYPTION_SECRET`     | ❌   | 用于加密敏感数据的密钥（如不提供，将自动生成）        |
+| `ACTIONS_VAR_TOKEN`     | ✅   | 用于部署控制面板的 GitHub Token（使用控制面板时需要，如不使用这不需要） |
 
-#### 获取 Cloudflare API 令牌
+#### 3️⃣ 获取 Cloudflare API 令牌
 
-1. 访问 [Cloudflare Dashboard](https://dash.cloudflare.com/profile/api-tokens)
-2. 创建新的 API 令牌
-3. 选择"编辑 Cloudflare Workers"模板，并添加 D1 数据库编辑权限
+**获取 API Token：**
 
-   ![D1](./images/D1.png)
+1. 访问 [Cloudflare API Tokens](https://dash.cloudflare.com/profile/api-tokens)
+2. 点击 **Create Token**
+3. 选择 **Edit Cloudflare Workers** 模板
+4. **添加额外权限**：
+    - Account → **D1** → **Edit**
+    - Account → **Cloudflare Pages** → **Edit** (如使用分离部署)
+5. 点击 **Continue to summary** → **Create Token**
+6. **复制 Token** 并保存到 GitHub Secrets
 
-### 后端自动部署
+![D1 Permission](./images/D1.png)
 
-Fork 仓库，填好密钥，然后运行工作流!!!
-每当 `backend` 目录中的文件有更改并推送到 `main` 或 `master` 分支时，会自动触发部署。工作流程如下：
+**获取 Account ID：**
 
-1. **自动创建 D1 数据库**（如果不存在）
-2. **用 schema.sql 初始化数据库**（创建表和初始数据）
-3. **设置 ENCRYPTION_SECRET 环境变量**（从 GitHub Secrets 获取或自动生成）
-4. 自动部署 Worker 到 Cloudflare
-5. 建议设置自定义域名代替 Cloudflare 原本提供的域名(否则国内无法访问)
+1. 访问 [Cloudflare Dashboard](https://dash.cloudflare.com)
+2. 在右侧栏找到 **Account ID**
+3. 点击复制并保存到 GitHub Secrets
 
-**<span style="color:red">⚠️ 记住你的后端域名 </span>**
+#### 4️⃣ （可选）配置部署控制面板
 
-### 前端自动部署
+如果您想使用可视化控制面板管理自动部署开关，需要额外配置：
 
-#### Cloudflare Pages(推荐)
+**创建 GitHub Personal Access Token：**
 
-Fork 仓库，填好密钥，然后运行工作流
-每当 `frontend` 目录中的文件有更改并推送到 `main` 或 `master` 分支时，会自动触发部署。部署后需在 Cloudflare Pages 控制面板设置环境变量：
+1. 访问 [GitHub Token 设置](https://github.com/settings/tokens)
+2. 点击 **Generate new token** → **Generate new token (classic)**
+3. 设置 Token 名称（如 `CloudPaste Deployment Control`）
+4. 选择权限：
+    - ✅ **repo** (完整仓库访问权限)
+    - ✅ **workflow** (工作流权限)
+5. 点击 **Generate token**
+6. 复制 Token 并保存为 Secret `ACTIONS_VAR_TOKEN`
+
+**使用控制面板：**
+
+1. 进入仓库 **Actions** 标签页
+2. 在左侧工作流列表中，点击 **🎛️ 部署控制面板**
+3. 点击右侧 **Run workflow** → **Run workflow**
+4. 在弹出界面中选择要开启/关闭的部署方式
+5. 点击 **Run workflow** 应用配置
+6. 控制面板会在写入开关状态后，自动触发对应的部署工作流一次（是否真正部署由当前开关状态决定）
+
+---
+
+### 🔄 一体化部署教程（推荐）
+
+#### 部署步骤
+
+1️⃣ **配置完成 GitHub Secrets**（参考上方配置章节）
+
+2️⃣ **触发部署工作流**
+
+方式一：手动触发（首次部署推荐）
+
+- 进入仓库 **Actions** 标签页
+- 点击左侧 **Deploy SPA CF Workers[一体化部署]**
+- 点击右侧 **Run workflow** → 选择 `main` 分支 → **Run workflow**
+
+方式二：自动触发
+
+- 使用部署控制面板开启 **SPA 一体化自动部署**
+- 之后每次推送 `frontend/` 或 `backend/` 目录的代码到 `main` 分支时自动部署
+
+> 提示：在 Actions 页面手动运行 **Deploy SPA CF Workers[一体化部署]** 工作流时，会强制部署一次，不受自动部署开关影响；自动部署行为（push 或控制面板触发）始终由 `SPA_DEPLOY` 开关控制。
+
+3️⃣ **等待部署完成**
+
+部署过程约 3-5 分钟，工作流会自动完成以下步骤：
+
+- ✅ 构建前端静态资源
+- ✅ 安装后端依赖
+- ✅ 创建/验证 D1 数据库
+- ✅ 初始化数据库表结构
+- ✅ 设置加密密钥
+- ✅ 部署到 Cloudflare Workers
+
+#### 部署完成
+
+
+**访问您的应用：** `https://cloudpaste-spa.your-account.workers.dev`
+
+**后续配置：**
+
+1. 首次访问会自动初始化数据库
+2. 使用默认管理员账户登录：
+    - 用户名：`admin`
+    - 密码：`admin123`
+3. **⚠️ 重要：立即修改默认管理员密码！**
+4. 在管理员面板中配置您的 S3/WEBDAV 兼容存储服务
+5. （可选）在 Cloudflare Dashboard 中绑定自定义域名
+
+---
+
+### 🔀 前后端分离部署教程
+
+如果您选择前后端分离部署，请按以下步骤操作：
+
+#### 后端部署
+
+1️⃣ **配置完成 GitHub Secrets**（参考上方配置章节）
+
+2️⃣ **触发后端部署**
+
+方式一：手动触发
+
+- 进入仓库 **Actions** 标签页
+- 点击左侧 **Deploy Backend CF Workers[Worker后端分离部署]**
+- 点击 **Run workflow** → **Run workflow**
+
+方式二：自动触发
+
+- 使用部署控制面板开启 **后端分离自动部署**
+- 推送 `backend/` 目录代码时自动部署
+
+3️⃣ **等待部署完成**
+
+工作流会自动完成：
+
+- ✅ 创建/验证 D1 数据库
+- ✅ 初始化数据库表结构
+- ✅ 设置加密密钥
+- ✅ 部署 Worker 到 Cloudflare
+
+4️⃣ **记录后端地址**
+
+部署成功后记下您的后端 Worker URL：
+`https://cloudpaste-backend.your-account.workers.dev`
+
+**<span style="color:red">⚠️ 重要：记住您的后端域名，前端部署时需要使用！</span>**
+
+#### 前端部署
+
+##### Cloudflare Pages
+
+1️⃣ **触发前端部署**
+
+方式一：手动触发
+
+- 进入仓库 **Actions** 标签页
+- 点击左侧 **Deploy Frontend CF Pages[Pages前端分离部署]**
+- 点击 **Run workflow** → **Run workflow**
+
+方式二：自动触发
+
+- 使用部署控制面板开启 **前端分离自动部署**
+- 推送 `frontend/` 目录代码时自动部署
+
+> 提示：在 Actions 页面手动运行「后端」「前端」部署工作流时，同样会强制部署一次，不受自动部署开关影响；自动部署行为由 `BACKEND_DEPLOY` / `FRONTEND_DEPLOY` 开关控制。
+
+2️⃣ **配置环境变量**
+
+**必须步骤：前端部署完成后，需要手动配置后端地址！**
 
 1. 登录 [Cloudflare Dashboard](https://dash.cloudflare.com/)
-2. 导航到 Pages → 您的项目（如 "cloudpaste-frontend"）
-3. 点击 "Settings" → "Environment variables"
+2. 导航到 **Pages** → **cloudpaste-frontend**
+3. 点击 **Settings** → **Environment variables**
 4. 添加环境变量：
+    - **名称**：`VITE_BACKEND_URL`
+    - **值**：您的后端 Worker URL（如 `https://cloudpaste-backend.your-account.workers.dev`）
+    - **注意**：末尾不带 `/`，建议使用自定义域名
 
-   - 名称：`VITE_BACKEND_URL`
-   - 值：刚刚部署的后端 Worker URL（如 `https://cloudpaste-backend.your-username.workers.dev`），末尾不带"/", 同时建议使用自定义的 worker 后端域名。
+**<span style="color:red">⚠️ 必须填写完整的后端域名，格式：https://xxxx.com</span>**
 
-   - **<span style="color:red">一定要完整的填写后端域名,"https://xxxx.com" 格式</span>**
+3️⃣ **重新部署前端**
 
-5. 重要步骤： 随后要再次运行一遍前端的工作流，以便完成后端域名加载！！！
+**重要：配置环境变量后，必须再次运行前端工作流！**
 
-   ![test-1](./images/test-1.png)
+- 返回 GitHub Actions
+- 再次手动触发 **Deploy Frontend CF Pages** 工作流
+- 这样才能加载后端域名配置
 
-**<span style="color:red">务必严格按照步骤操作，否则会出现后端域名加载失败</span>**
-**<span style="color:red">⚠️ 安全提示：请在系统初始化后立即修改默认管理员密码（用户名: admin, 密码: admin123）。</span>**
+![Frontend Redeploy](./images/test-1.png)
 
-#### Vercel
+4️⃣ **访问应用**
 
-Vercel 建议使用以下方式部署：
+前端部署地址：`https://cloudpaste-frontend.pages.dev`
 
-1. Fork 后导入 GitHub 项目
+**<span style="color:red">⚠️ 务必严格按照步骤操作，否则会出现后端域名加载失败！</span>**
+
+##### Vercel（备选方案）
+
+Vercel 部署步骤：
+
+1. Fork 后在 Vercel 中导入 GitHub 项目
 2. 配置部署参数：
 
 ```
@@ -226,16 +390,109 @@ Output Directory（输出目录）: dist
 Install Command（安装命令）: npm install
 ```
 
-3. 在下面配置环境变量：输入：VITE_BACKEND_URL 和你的后端域名
-4. 点击 "Deploy" 按钮进行部署
+3. 配置环境变量：
+    - 名称：`VITE_BACKEND_URL`
+    - 值：您的后端 Worker URL
+4. 点击 **Deploy** 按钮进行部署
 
-☝️ **以上二选一即可**
+**☝️ Cloudflare Pages 和 Vercel 二选一即可**
+
+**<span style="color:red">⚠️ 安全提示：请在系统初始化后立即修改默认管理员密码（用户名: admin, 密码: admin123）。</span>**
 
 ---
 
-## 手动部署:
+## 手动部署
 
-### 后端手动部署
+CloudPaste 支持两种手动部署方式：一体化部署（推荐）和前后端分离部署。
+
+### 🔄 一体化手动部署（推荐）
+
+一体化部署将前后端部署到同一个 Cloudflare Worker，配置更简单，成本更低。
+
+#### 步骤 1：克隆仓库
+
+```bash
+git clone https://github.com/ling-drag0n/CloudPaste.git
+cd CloudPaste
+```
+
+#### 步骤 2：构建前端
+
+```bash
+cd frontend
+npm install
+npm run build
+cd ..
+```
+
+**验证构建产物：** 确保 `frontend/dist` 目录存在且包含 `index.html`
+
+#### 步骤 3：配置后端
+
+```bash
+cd backend
+npm install
+npx wrangler login
+```
+
+#### 步骤 4：创建 D1 数据库
+
+```bash
+npx wrangler d1 create cloudpaste-db
+```
+
+记下输出的 `database_id`（例如：`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`）
+
+#### 步骤 5：初始化数据库
+
+```bash
+npx wrangler d1 execute cloudpaste-db --file=./schema.sql
+```
+
+#### 步骤 6：配置 wrangler.spa.toml
+
+编辑 `backend/wrangler.spa.toml` 文件，修改数据库 ID：
+
+```toml
+[[d1_databases]]
+binding = "DB"
+database_name = "cloudpaste-db"
+database_id = "您的数据库ID"  # 替换为步骤4获取的ID
+```
+
+#### 步骤 7：部署到 Cloudflare Workers
+
+```bash
+npx wrangler deploy --config wrangler.spa.toml
+```
+
+部署成功后，会显示您的应用 URL：
+
+```
+Published cloudpaste-spa (X.XX sec)
+  https://cloudpaste-spa.your-account.workers.dev
+```
+
+#### 部署完成！
+
+**访问您的应用：** 打开上述 URL 即可使用 CloudPaste
+
+**后续配置：**
+1. 首次访问会自动初始化数据库
+2. 使用默认管理员账户登录（用户名：`admin`，密码：`admin123`）
+3. **⚠️ 立即修改默认管理员密码！**
+4. 在管理员面板中配置 S3 兼容存储服务
+5. （可选）在 Cloudflare Dashboard 中绑定自定义域名
+
+**<span style="color:red">⚠️ 安全提示：请在系统初始化后立即修改默认管理员密码。</span>**
+
+---
+
+### 🔀 前后端分离手动部署
+
+如果您需要前后端独立部署和管理，可以选择分离部署方式。
+
+#### 后端手动部署
 
 1. 克隆仓库
 
@@ -288,9 +545,9 @@ cd CloudPaste/backend
    https://cloudpaste-backend.your-username.workers.dev
    ```
 
-**<span style="color:red">⚠️ 安全提示：请在系统初始化后立即修改默认管理员密码（用户名: admin, 密码: admin123）。</span>**
+**<span style="color:red">⚠️ 重要：记住您的后端域名，前端部署时需要使用！</span>**
 
-### 前端手动部署
+#### 前端手动部署
 
 #### Cloudflare Pages
 
@@ -328,12 +585,12 @@ cd CloudPaste/backend
 
    **方法二**：通过 Cloudflare Dashboard
 
-   1. 登录 [Cloudflare Dashboard](https://dash.cloudflare.com/)
-   2. 选择 "Pages"
-   3. 点击 "Create a project" → "Direct Upload"
-   4. 上传 `dist` 目录内的文件
-   5. 设置项目名称（如 "cloudpaste-frontend"）
-   6. 点击 "Save and Deploy"
+    1. 登录 [Cloudflare Dashboard](https://dash.cloudflare.com/)
+    2. 选择 "Pages"
+    3. 点击 "Create a project" → "Direct Upload"
+    4. 上传 `dist` 目录内的文件
+    5. 设置项目名称（如 "cloudpaste-frontend"）
+    6. 点击 "Save and Deploy"
 
 #### Vercel
 
@@ -400,8 +657,8 @@ cd CloudPaste/backend
 ### 📑 目录
 
 - [Docker 命令行部署](#Docker命令行部署:)
-   - [后端 Docker 部署](#后端Docker部署)
-   - [前端 Docker 部署](#前端Docker部署)
+    - [后端 Docker 部署](#后端Docker部署)
+    - [前端 Docker 部署](#前端Docker部署)
 - [Docker Compose 一键部署](#Docker-Compose一键部署:)
 
 ---
@@ -426,7 +683,6 @@ CloudPaste 后端支持通过官方 Docker 镜像快速部署。
      -v $(pwd)/sql_data:/data \
      -e ENCRYPTION_SECRET=您的加密密钥 \
      -e NODE_ENV=production \
-     -e RUNTIME_ENV=docker \
      dragon730/cloudpaste-backend:latest
    ```
 
@@ -494,9 +750,9 @@ services:
     image: dragon730/cloudpaste-backend:latest
     environment:
       - NODE_ENV=production
-      - RUNTIME_ENV=docker
       - PORT=8787
       - ENCRYPTION_SECRET=自定义密钥 # 请修改为您自己的安全密钥
+      - TASK_WORKER_POOL_SIZE=2 # 任务工作池大小
     volumes:
       - ./sql_data:/data # 数据持久化
     ports:
@@ -593,11 +849,16 @@ server {
 
         # 处理大文件
         client_max_body_size 0;
+        client_body_buffer_size 128k;
 
-        # 超时设置
-        proxy_connect_timeout 3600s;
-        proxy_send_timeout 3600s;
-        proxy_read_timeout 3600s;
+        # WebDAV 上传/下载优化
+        proxy_buffering off;           # 关闭代理缓冲，减少延迟
+        proxy_request_buffering off;   # 关闭请求缓冲，让数据流式传输
+        proxy_max_temp_file_size 0;    # 不生成临时文件
+        send_timeout 3600;             # 上传超时时间
+        proxy_read_timeout 3600;       # 读取超时
+        proxy_send_timeout 3600;       # 发送超时
+        proxy_connect_timeout 300;     # 连接超时
     }
 }
 ```
@@ -762,27 +1023,27 @@ b2-windows.exe bucket update <bucketName> allPrivate --cors-rules "[{\"corsRuleN
 
 5. **在 CloudPaste 中配置 MinIO**
 
-   - 登录 CloudPaste 管理界面
-   - 进入 "S3 存储配置" → "添加存储配置"
-   - 选择 "其他兼容 S3 服务" 作为提供商类型
-   - 填入以下信息：
-      - 名称：自定义名称
-      - 端点 URL：您的 MinIO 服务地址（如 `https://minio.example.com`）
-      - 存储桶名称：之前创建的存储桶名称
-      - 访问密钥 ID：您的 Access Key
-      - 访问密钥：您的 Secret Key
-      - 区域：可留空
-      - 路径风格访问：必须启用！！！！
-   - 点击 "测试连接" 确认配置正确
-   - 保存配置
+    - 登录 CloudPaste 管理界面
+    - 进入 "S3 存储配置" → "添加存储配置"
+    - 选择 "其他兼容 S3 服务" 作为提供商类型
+    - 填入以下信息：
+        - 名称：自定义名称
+        - 端点 URL：您的 MinIO 服务地址（如 `https://minio.example.com`）
+        - 存储桶名称：之前创建的存储桶名称
+        - 访问密钥 ID：您的 Access Key
+        - 访问密钥：您的 Secret Key
+        - 区域：可留空
+        - 路径风格访问：必须启用！！！！
+    - 点击 "测试连接" 确认配置正确
+    - 保存配置
 
 6. **注意与故障排查**
 
-   - **注意事项**：如使用 Cloudfare 开启 cdn 可能需要加上 proxy_set_header Accept-Encoding "identity"，同时存在缓存问题，最好仅用 DNS 解析
-   - **403 错误**：确保反向代理配置中包含 `proxy_cache off` 和 `proxy_buffering off`
-   - **预览问题**：确保 MinIO 服务器正确配置了 `MINIO_SERVER_URL` 和 `MINIO_BROWSER_REDIRECT_URL`
-   - **上传失败**：检查 CORS 配置是否正确，确保允许的源包含您的前端域名
-   - **控制台无法访问**：检查 WebSocket 配置是否正确，特别是 `Connection "upgrade"` 设置
+    - **注意事项**：如使用 Cloudfare 开启 cdn 可能需要加上 proxy_set_header Accept-Encoding "identity"，同时存在缓存问题，最好仅用 DNS 解析
+    - **403 错误**：确保反向代理配置中包含 `proxy_cache off` 和 `proxy_buffering off`
+    - **预览问题**：确保 MinIO 服务器正确配置了 `MINIO_SERVER_URL` 和 `MINIO_BROWSER_REDIRECT_URL`
+    - **上传失败**：检查 CORS 配置是否正确，确保允许的源包含您的前端域名
+    - **控制台无法访问**：检查 WebSocket 配置是否正确，特别是 `Connection "upgrade"` 设置
 
 ## 更多 S3 相关配置待续......
 
@@ -799,10 +1060,10 @@ CloudPaste 提供简易的 WebDAV 协议支持，允许您将存储空间挂载�
 
 - **WebDAV 基础 URL**: `https://你的后端域名/dav`
 - **支持的认证方式**:
-   - Basic 认证（用户名+密码）
+    - Basic 认证（用户名+密码）
 - **支持的权限类型**:
-   - 管理员账户 - 拥有完整操作权限
-   - API 密钥 - 按需启用
+    - 管理员账户 - 拥有完整操作权限
+    - API 密钥 - 按需启用
 
 ### 权限配置
 
@@ -821,8 +1082,8 @@ CloudPaste 提供简易的 WebDAV 协议支持，允许您将存储空间挂载�
 2. 导航至"API 密钥管理"
 3. 创建新 API 密钥，**确保启用"挂载权限"**
 4. 使用方式：
-   - **用户名**: API 密钥值
-   - **密码**: 与用户名相同的 API 密钥值
+    - **用户名**: API 密钥值
+    - **密码**: 与用户名相同的 API 密钥值
 
 ### NGINX 反向代理配置
 
@@ -862,20 +1123,20 @@ location /dav {
 
 1. **连接问题**:
 
-   - 确认 WebDAV URL 格式正确
-   - 验证认证凭据是否有效
-   - 检查 API 密钥是否具有挂载权限
+    - 确认 WebDAV URL 格式正确
+    - 验证认证凭据是否有效
+    - 检查 API 密钥是否具有挂载权限
 
 2. **权限错误**:
 
-   - 确认账户具有所需的权限
-   - 管理员账户应有完整权限
-   - API 密钥需特别启用挂载权限
+    - 确认账户具有所需的权限
+    - 管理员账户应有完整权限
+    - API 密钥需特别启用挂载权限
 
 3. **⚠️⚠️ Webdav 上传问题**:
 
-   - Worker 部署的 webdav 上传大小可能受限于 CF 的 CDN 限制 100MB 左右，导致报错 413
-   - 对于 Docker 部署，只需注意 nginx 代理配置，上传模式任意。
+    - Worker 部署的 webdav 上传大小可能受限于 CF 的 CDN 限制 100MB 左右，导致报错 413
+    - 对于 Docker 部署，只需注意 nginx 代理配置，上传模式任意。
 
 </details>
 
@@ -933,8 +1194,8 @@ location /dav {
 
 4. **配置环境变量**
 
-   - 在 `backend` 目录下，创建 `wrangler.toml` 文件设置开发环境变量
-   - 在 `frontend` 目录下，配置 `.env.development` 文件设置前端环境变量
+    - 在 `backend` 目录下，创建 `wrangler.toml` 文件设置开发环境变量
+    - 在 `frontend` 目录下，配置 `.env.development` 文件设置前端环境变量
 
 5. **启动开发服务器**
 
@@ -1086,17 +1347,17 @@ Apache License 2.0
 
 - **赞助**：项目维护不易，喜欢本项目的话，可以作者大大一点小小的鼓励哦，您的每一份支持都是我前进的动力\~
 
-    ![image.png](./images/PayQrcode.png)
+  ![image.png](./images/PayQrcode.png)
 
   <a href="https://afdian.com/a/drag0n"><img width="200" src="https://pic1.afdiancdn.com/static/img/welcome/button-sponsorme.png" alt=""></a>
 
-  - **赞助者**：非常感谢以下赞助者对本项目的支持！！
+    - **赞助者**：非常感谢以下赞助者对本项目的支持！！
 
-    [![赞助者](https://afdian.730888.xyz/image)](https://afdian.com/a/drag0n)
+      [![赞助者](https://afdian.730888.xyz/image)](https://afdian.com/a/drag0n)
 
 - **Contributors**：感谢以下贡献者对本项目的无私贡献！
-  
-    [![Contributors](https://contrib.rocks/image?repo=ling-drag0n/CloudPaste)](https://github.com/ling-drag0n/CloudPaste/graphs/contributors)
+
+  [![Contributors](https://contrib.rocks/image?repo=ling-drag0n/CloudPaste)](https://github.com/ling-drag0n/CloudPaste/graphs/contributors)
 
 ## Star History
 

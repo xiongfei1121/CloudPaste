@@ -2,19 +2,22 @@
 import { ref, onMounted } from "vue";
 import { useI18n } from "vue-i18n";
 import VditorUnified from "@/components/common/VditorUnified.vue";
+import ConfirmDialog from "@/components/common/dialogs/ConfirmDialog.vue";
 import { useAdminSystemService } from "@/modules/admin/services/systemService.js";
+import { useThemeMode } from "@/composables/core/useThemeMode.js";
+import { useGlobalMessage } from "@/composables/core/useGlobalMessage.js";
+import { useConfirmDialog } from "@/composables/core/useConfirmDialog.js";
+import { IconGallery, IconRefresh } from "@/components/icons";
 
 // 使用i18n
 const { t } = useI18n();
 const { getSiteSettings, updateSiteSettings } = useAdminSystemService();
 
-// 定义props
-const props = defineProps({
-  darkMode: {
-    type: Boolean,
-    required: true,
-  },
-});
+const { isDarkMode: darkMode } = useThemeMode();
+const { showSuccess, showError } = useGlobalMessage();
+
+// 确认对话框
+const { dialogState, confirm, handleConfirm, handleCancel } = useConfirmDialog();
 
 // 站点设置
 const siteSettings = ref({
@@ -27,11 +30,9 @@ const siteSettings = ref({
   site_custom_body: "",
 });
 
-// 设置更新状态
+// 设置更新状态（仅用于控制加载状态）
 const settingsStatus = ref({
   loading: false,
-  success: false,
-  error: "",
 });
 
 // 获取设置数据（使用新的分组API）
@@ -59,7 +60,8 @@ onMounted(async () => {
     });
   } catch (error) {
     console.error("获取站点设置失败:", error);
-    settingsStatus.value.error = "获取站点设置失败: " + error.message;
+    const message = "获取站点设置失败: " + error.message;
+    showError(message);
   }
 });
 
@@ -68,8 +70,6 @@ const handleUpdateSiteSettings = async (event) => {
   event.preventDefault();
 
   settingsStatus.value.loading = true;
-  settingsStatus.value.success = false;
-  settingsStatus.value.error = "";
 
   try {
     // 准备更新数据
@@ -86,7 +86,7 @@ const handleUpdateSiteSettings = async (event) => {
     // 使用分组批量更新API
     await updateSiteSettings(updateData);
 
-    settingsStatus.value.success = true;
+    showSuccess(t("admin.site.messages.updateSuccess"));
 
       // 更新站点配置Store缓存
       try {
@@ -106,24 +106,36 @@ const handleUpdateSiteSettings = async (event) => {
       }, 3000);
   } catch (error) {
     console.error("更新站点设置失败:", error);
-    settingsStatus.value.error = error.message || "更新站点设置失败";
+    const message = error.message || "更新站点设置失败";
+    showError(message);
   } finally {
     settingsStatus.value.loading = false;
   }
 };
 
 // 重置设置
-const resetSettings = () => {
-  if (confirm(t("admin.site.messages.confirmReset"))) {
-    // 重置所有站点设置到默认值
-    siteSettings.value.site_title = "CloudPaste";
-    siteSettings.value.site_favicon_url = "";
-    siteSettings.value.site_footer_markdown = "© 2025 CloudPaste. 保留所有权利。";
-    siteSettings.value.site_announcement_enabled = false;
-    siteSettings.value.site_announcement_content = "";
+const resetSettings = async () => {
+  // 使用统一确认对话框
+  const confirmed = await confirm({
+    title: t("common.dialogs.resetTitle"),
+    message: t("common.dialogs.resetConfirm"),
+    confirmType: "warning",
+    confirmText: t("common.dialogs.resetButton"),
+    darkMode: darkMode.value,
+  });
 
-    console.log("站点设置已重置为默认值");
+  if (!confirmed) {
+    return;
   }
+
+  // 重置所有站点设置到默认值
+  siteSettings.value.site_title = "CloudPaste";
+  siteSettings.value.site_favicon_url = "";
+  siteSettings.value.site_footer_markdown = "© 2025 CloudPaste. 保留所有权利。";
+  siteSettings.value.site_announcement_enabled = false;
+  siteSettings.value.site_announcement_content = "";
+
+  console.log("站点设置已重置为默认值");
 };
 
 // 清空公告内容
@@ -139,39 +151,6 @@ const handleClearAnnouncementContent = () => {
     <div class="mb-6">
       <h1 class="text-2xl font-bold mb-2" :class="darkMode ? 'text-white' : 'text-gray-800'">{{ t("admin.site.title") }}</h1>
       <p class="text-base" :class="darkMode ? 'text-gray-300' : 'text-gray-600'">{{ t("admin.site.description") }}</p>
-    </div>
-
-    <!-- 状态消息 -->
-    <div v-if="settingsStatus.success || settingsStatus.error" class="mb-6">
-      <div
-        v-if="settingsStatus.success"
-        class="rounded-lg p-4 border"
-        :class="darkMode ? 'bg-green-900/20 border-green-800/40 text-green-200' : 'bg-green-50 border-green-200 text-green-800'"
-      >
-        <div class="flex items-center">
-          <svg class="h-5 w-5 mr-2 flex-shrink-0" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
-            <path
-              fill-rule="evenodd"
-              d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z"
-              clip-rule="evenodd"
-            />
-          </svg>
-          <p class="text-sm font-medium">{{ t("admin.site.messages.updateSuccess") }}</p>
-        </div>
-      </div>
-
-      <div v-if="settingsStatus.error" class="rounded-lg p-4 border" :class="darkMode ? 'bg-red-900/20 border-red-800/40 text-red-200' : 'bg-red-50 border-red-200 text-red-800'">
-        <div class="flex items-center">
-          <svg class="h-5 w-5 mr-2 flex-shrink-0" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
-            <path
-              fill-rule="evenodd"
-              d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z"
-              clip-rule="evenodd"
-            />
-          </svg>
-          <p class="text-sm font-medium">{{ settingsStatus.error }}</p>
-        </div>
-      </div>
     </div>
 
     <!-- 设置分组 -->
@@ -220,9 +199,7 @@ const handleClearAnnouncementContent = () => {
                     class="w-6 h-6 object-contain"
                     @error="$event.target.style.display = 'none'"
                   />
-                  <svg v-else class="w-4 h-4" :class="darkMode ? 'text-gray-400' : 'text-gray-500'" fill="currentColor" viewBox="0 0 20 20">
-                    <path fill-rule="evenodd" d="M4 3a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V5a2 2 0 00-2-2H4zm12 12H4l4-8 3 6 2-4 3 6z" clip-rule="evenodd" />
-                  </svg>
+                  <IconGallery v-else size="sm" :class="darkMode ? 'text-gray-400' : 'text-gray-500'" aria-hidden="true" />
                 </div>
               </div>
               <!-- URL输入框 -->
@@ -354,20 +331,20 @@ const handleClearAnnouncementContent = () => {
               :disabled="settingsStatus.loading"
               class="px-4 py-2 text-sm font-medium text-white bg-blue-600 border border-transparent rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center"
             >
-              <svg v-if="settingsStatus.loading" class="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                <path
-                  class="opacity-75"
-                  fill="currentColor"
-                  d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-                ></path>
-              </svg>
+              <IconRefresh v-if="settingsStatus.loading" size="sm" class="animate-spin -ml-1 mr-2 text-white" aria-hidden="true" />
               {{ settingsStatus.loading ? t("admin.site.buttons.updating") : t("admin.site.buttons.updateSettings") }}
             </button>
           </div>
         </form>
       </div>
     </div>
+
+    <!-- 确认对话框 -->
+    <ConfirmDialog
+      v-bind="dialogState"
+      @confirm="handleConfirm"
+      @cancel="handleCancel"
+    />
   </div>
 </template>
 

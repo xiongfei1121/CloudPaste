@@ -29,17 +29,10 @@
                 @click="emit('view', paste.slug)"
                 :class="isExpired(paste) ? 'text-red-600 dark:text-red-400' : 'text-primary-600 dark:text-primary-400'"
               >
-                {{ paste.slug }}
+                {{ paste.title || paste.remark || paste.slug }}
               </span>
               <button @click="emit('copy-link', paste.slug)" class="ml-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 relative" title="复制链接">
-                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    stroke-width="2"
-                    d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
-                  />
-                </svg>
+                <IconCopy class="h-4 w-4" />
                 <!-- 复制成功提示 -->
                 <span v-if="copiedTexts[paste.id]" class="absolute -top-8 left-1/2 transform -translate-x-1/2 px-2 py-1 text-xs text-white bg-green-500 rounded whitespace-nowrap">
                   已复制
@@ -47,14 +40,7 @@
               </button>
               <!-- 二维码按钮 -->
               <button @click="emit('show-qrcode', paste.slug)" class="ml-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200" title="显示二维码">
-                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    stroke-width="2"
-                    d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z"
-                  />
-                </svg>
+                <IconQrCode class="h-4 w-4" />
               </button>
             </div>
 
@@ -62,49 +48,24 @@
             <div class="flex space-x-2">
               <!-- 预览按钮 -->
               <button class="text-primary-600 hover:text-primary-900 dark:text-primary-400 dark:hover:text-primary-300 p-1" @click="emit('preview', paste)">
-                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                  <path
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    stroke-width="2"
-                    d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"
-                  />
-                </svg>
+                <IconEye class="h-5 w-5" />
               </button>
 
               <!-- 编辑按钮 -->
               <button class="text-indigo-600 hover:text-indigo-900 dark:text-indigo-400 dark:hover:text-indigo-300 p-1" @click="emit('edit', paste)">
-                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    stroke-width="2"
-                    d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"
-                  />
-                </svg>
+                <IconRename class="h-5 w-5" />
               </button>
 
               <!-- 复制原始文本直链按钮 -->
-              <button class="text-purple-600 hover:text-purple-900 dark:text-purple-400 dark:hover:text-purple-300 p-1 relative" @click="emit('copy-raw-link', paste)">
-                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101" />
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.172 13.828a4 4 0 015.656 0l4 4a4 4 0 01-5.656 5.656l-1.102-1.101" />
-                </svg>
+              <button class="text-purple-600 hover:text-purple-900 dark:text-purple-400 dark:hover:text-purple-300 p-1 relative" @click="emit('copy-raw-link', paste.slug)">
+                <IconLink class="h-5 w-5" />
                 <!-- 原始文本直链复制成功提示 -->
                 <span v-if="copiedRawTexts[paste.id]" class="absolute -top-8 right-0 px-2 py-1 text-xs text-white bg-green-500 rounded whitespace-nowrap">已复制直链</span>
               </button>
 
               <!-- 删除按钮 -->
               <button class="text-red-600 hover:text-red-900 dark:text-red-400 dark:hover:text-red-300 p-1" @click="emit('delete', paste.id)">
-                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    stroke-width="2"
-                    d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
-                  />
-                </svg>
+                <IconDelete class="h-5 w-5" />
               </button>
             </div>
           </div>
@@ -134,6 +95,25 @@
               <span class="text-gray-500 dark:text-gray-400 w-16 flex-shrink-0">创建:</span>
               <span :class="darkMode ? 'text-gray-300' : 'text-gray-700'">{{ formatDate(paste.created_at) }}</span>
             </div>
+
+            <!-- 可见性 -->
+            <div class="flex">
+              <span class="text-gray-500 dark:text-gray-400 w-16 flex-shrink-0">可见性:</span>
+              <span
+                v-if="paste.is_public === false"
+                class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-200"
+              >
+                <IconEyeOff class="h-3 w-3 mr-0.5" />
+                仅内部
+              </span>
+              <span
+                v-else
+                class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-700 dark:bg-green-800 dark:text-green-100"
+              >
+                <IconGlobeAlt class="h-3 w-3 mr-0.5" />
+                公开
+              </span>
+            </div>
           </div>
         </div>
       </div>
@@ -144,9 +124,12 @@
 <script setup>
 import { computed, h } from "vue";
 import AdminTable from "@/components/common/AdminTable.vue";
+import { IconCopy, IconDelete, IconEye, IconEyeOff, IconGlobeAlt, IconLink, IconQrCode, IconRename } from "@/components/icons";
 
 // 导入统一的时间处理工具
-import { formatDateTime, formatExpiry as formatExpiryUtil, isExpired as isExpiredUtil } from "@/utils/timeUtils.js";
+import { formatDateTime, formatExpiry as formatExpiryUtil, formatRelativeTime, parseUTCDate, isExpired as isExpiredUtil } from "@/utils/timeUtils.js";
+// 导入创建者徽章统一逻辑
+import { creatorBadgeUtils } from "@/composables/admin-management/useCreatorBadge.js";
 
 const props = defineProps({
   darkMode: {
@@ -175,7 +158,7 @@ const props = defineProps({
   },
 });
 
-const emit = defineEmits(["toggle-select-all", "toggle-select-item", "view", "copy-link", "copy-raw-link", "preview", "edit", "delete", "show-qrcode"]);
+const emit = defineEmits(["toggle-select-all", "toggle-select-item", "view", "copy-link", "copy-raw-link", "preview", "edit", "delete", "show-qrcode", "toggle-visibility"]);
 
 // 工具函数
 const truncateText = (text, length = 10) => {
@@ -229,25 +212,88 @@ const handleSelectionChange = (event) => {
   }
 };
 
+// 加密徽章样式（参考文件管理）
+const passwordBadgeClass = computed(
+  () =>
+    `inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide ${
+      props.darkMode ? "bg-amber-500/15 text-amber-100 border-amber-400/30" : "bg-amber-50 text-amber-700 border-amber-200"
+    }`
+);
+
+const passwordIconClass = computed(() => (props.darkMode ? "text-amber-200" : "text-amber-600"));
+
+// 渲染加密徽章
+const renderPasswordBadge = () =>
+  h(
+    "span",
+    {
+      class: `${passwordBadgeClass.value} ml-2`,
+      title: "密码保护",
+    },
+    [
+      h(
+        "svg",
+        {
+          xmlns: "http://www.w3.org/2000/svg",
+          class: `h-3 w-3 ${passwordIconClass.value}`,
+          fill: "none",
+          viewBox: "0 0 24 24",
+          stroke: "currentColor",
+        },
+        [
+          h("path", {
+            "stroke-linecap": "round",
+            "stroke-linejoin": "round",
+            "stroke-width": "2",
+            d: "M7 11V7a5 5 0 0110 0v4",
+          }),
+          h("rect", {
+            "stroke-linecap": "round",
+            "stroke-linejoin": "round",
+            "stroke-width": "2",
+            x: "6",
+            y: "11",
+            width: "12",
+            height: "9",
+            rx: "2",
+          }),
+        ]
+      ),
+      h(
+        "span",
+        {
+          class: "leading-none",
+        },
+        "加密"
+      ),
+    ]
+  );
+
 // 创建columns配置
 const pasteColumns = computed(() => [
   {
     key: "slug",
     type: "accessor",
-    header: "链接",
+    header: "标题",
     sortable: true,
     render: (_, paste) => {
       if (!paste) return h("span", "无数据");
+      const displayTitle = paste.title || paste.slug || paste.remark;
       return h("div", { class: "flex items-center space-x-2" }, [
-        h(
-          "span",
-          {
-            class: ["cursor-pointer hover:underline truncate max-w-[120px]", isExpired(paste) ? "text-red-600 dark:text-red-400" : "text-primary-600 dark:text-primary-400"],
-            title: paste.slug,
-            onClick: () => emit("view", paste.slug),
-          },
-          paste.slug
-        ),
+        // 标题和加密徽章容器
+        h("div", { class: "flex items-center" }, [
+          h(
+            "span",
+            {
+              class: ["cursor-pointer hover:underline truncate max-w-[120px]", isExpired(paste) ? "text-red-600 dark:text-red-400" : "text-primary-600 dark:text-primary-400"],
+              title: displayTitle,
+              onClick: () => emit("view", paste.slug),
+            },
+            displayTitle
+          ),
+          // 加密徽章（仅在有密码时显示）
+          paste.has_password ? renderPasswordBadge() : null,
+        ]),
         // 复制链接按钮
         h(
           "button",
@@ -378,84 +424,44 @@ const pasteColumns = computed(() => [
     },
     render: (_, paste) => {
       if (!paste) return h("span", "无数据");
-      return h(
-        "span",
-        {
-          class: [props.darkMode ? "text-gray-300" : "text-gray-500", isExpired(paste) ? "text-red-600 dark:text-red-400" : ""],
-        },
-        paste.expires_at ? formatExpiry(paste.expires_at) : "永不过期"
-      );
-    },
-  },
-  {
-    key: "password",
-    type: "display",
-    header: "密码",
-    sortable: false,
-    render: (paste) => {
-      if (!paste) return h("span", "无数据");
-      return h("div", { class: "flex items-center" }, [
-        paste.has_password
-          ? h(
-              "span",
-              {
-                class: [
-                  "inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium",
-                  isExpired(paste) ? "bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-300" : "bg-yellow-100 text-yellow-800 dark:bg-yellow-800 dark:text-yellow-100",
-                ],
-              },
-              [
-                h(
-                  "svg",
-                  {
-                    xmlns: "http://www.w3.org/2000/svg",
-                    class: "h-3 w-3 mr-1",
-                    fill: "none",
-                    viewBox: "0 0 24 24",
-                    stroke: "currentColor",
-                  },
-                  [
-                    h("path", {
-                      "stroke-linecap": "round",
-                      "stroke-linejoin": "round",
-                      "stroke-width": "2",
-                      d: "M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z",
-                    }),
-                  ]
-                ),
-                "已加密",
-              ]
-            )
-          : h(
-              "span",
-              {
-                class: [
-                  "inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium",
-                  isExpired(paste) ? "bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-300" : "bg-green-100 text-green-800 dark:bg-green-800 dark:text-green-100",
-                ],
-              },
-              [
-                h(
-                  "svg",
-                  {
-                    xmlns: "http://www.w3.org/2000/svg",
-                    class: "h-3 w-3 mr-1",
-                    fill: "none",
-                    viewBox: "0 0 24 24",
-                    stroke: "currentColor",
-                  },
-                  [
-                    h("path", {
-                      "stroke-linecap": "round",
-                      "stroke-linejoin": "round",
-                      "stroke-width": "2",
-                      d: "M8 11V7a4 4 0 118 0m-4 8v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2z",
-                    }),
-                  ]
-                ),
-                "公开",
-              ]
-            ),
+
+      if (!paste.expires_at) {
+        return h("span", {
+          class: props.darkMode ? "text-gray-300" : "text-gray-500"
+        }, "永不过期");
+      }
+
+      // 直接使用现有工具函数
+      const date = formatDateTime(paste.expires_at);
+      const relative = formatRelativeTime(paste.expires_at);
+
+      // 计算颜色（组件内逻辑，不污染工具类）
+      const expiryDate = parseUTCDate(paste.expires_at);
+      const now = new Date();
+      let colorClass;
+
+      if (expiryDate < now) {
+        colorClass = "text-red-600 dark:text-red-400";
+      } else {
+        const daysDiff = (expiryDate.getTime() - now.getTime()) / (1000 * 3600 * 24);
+        if (daysDiff <= 1) {
+          colorClass = "text-orange-600 dark:text-orange-400";
+        } else if (daysDiff <= 7) {
+          colorClass = "text-yellow-600 dark:text-yellow-400";
+        } else {
+          colorClass = "text-green-600 dark:text-green-400";
+        }
+      }
+
+      return h("div", { class: "flex flex-col" }, [
+        // 第一行：日期
+        h("span", {
+          class: props.darkMode ? "text-gray-300" : "text-gray-700"
+        }, date),
+        // 第二行：相对时间（小字+颜色）
+        relative ? h("span", {
+          class: ["text-xs", colorClass]
+        }, relative) : null
       ]);
     },
   },
@@ -478,7 +484,7 @@ const pasteColumns = computed(() => [
         if (remaining <= 0) {
           remainingText = "已用完";
           remainingClass = "text-red-500";
-        } else if (remaining < 3) {
+        } else if (remaining < 10) {
           remainingText = `${remaining} 次`;
           remainingClass = "text-yellow-500";
         } else {
@@ -503,30 +509,63 @@ const pasteColumns = computed(() => [
     sortable: true,
     render: (_, paste) => {
       if (!paste) return h("span", "无数据");
+      // 使用统一的创建者徽章工具
+      const badgeClass = creatorBadgeUtils.getBadgeClass(paste.created_by, paste.key_name);
+      const creatorType = creatorBadgeUtils.getCreatorType(paste.created_by, paste.key_name);
+      let text = "未知来源";
+      if (creatorType === "admin") {
+        text = "管理员";
+      } else if (creatorType === "apikey") {
+        text = paste.key_name ? `密钥：${paste.key_name}` : `密钥：${paste.created_by?.substring(7, 12) || ""}...`;
+      } else if (paste.created_by) {
+        text = paste.created_by;
+      }
       return h("div", { class: "flex items-center justify-center" }, [
-        paste.created_by && paste.created_by.startsWith("apikey:")
-          ? h(
-              "span",
-              {
-                class: "px-2 py-0.5 text-xs rounded bg-blue-100 text-blue-800 dark:bg-blue-800 dark:text-blue-100 inline-block text-center",
-              },
-              paste.key_name ? `密钥：${paste.key_name}` : `密钥：${paste.created_by.substring(7, 12)}...`
-            )
-          : paste.created_by === "admin" || (paste.created_by && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(paste.created_by))
-          ? h(
-              "span",
-              {
-                class: "px-2 py-0.5 text-xs rounded bg-green-100 text-green-800 dark:bg-green-800 dark:text-green-100 inline-block text-center",
-              },
-              "管理员"
-            )
-          : h(
-              "span",
-              {
-                class: "px-2 py-0.5 text-xs rounded bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300 inline-block text-center",
-              },
-              paste.created_by || "未知来源"
-            ),
+        h(
+          "span",
+          {
+            class: `px-2 py-0.5 text-xs rounded inline-block text-center ${badgeClass}`,
+          },
+          text
+        ),
+      ]);
+    },
+  },
+  {
+    key: "is_public",
+    type: "display",
+    header: "可见性",
+    sortable: true,
+    render: (paste) => {
+      if (!paste) return h("span", "无数据");
+
+      return h("div", { class: "flex items-center justify-center space-x-2" }, [
+        // 滑块按钮
+        h("button", {
+          type: "button",
+          onClick: (e) => {
+            e.stopPropagation();
+            emit("toggle-visibility", paste);
+          },
+          class: [
+            "relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 cursor-pointer",
+            paste.is_public
+              ? "bg-primary-600"
+              : (props.darkMode ? "bg-gray-700" : "bg-gray-200")
+          ]
+        }, [
+          // 滑块圆点
+          h("span", {
+            class: [
+              "inline-block h-4 w-4 transform rounded-full bg-white transition-transform",
+              paste.is_public ? "translate-x-6" : "translate-x-1"
+            ]
+          })
+        ]),
+        // 状态文字
+        h("span", {
+          class: ["text-xs", props.darkMode ? "text-gray-300" : "text-gray-700"]
+        }, paste.is_public ? "公开" : "私密")
       ]);
     },
   },
@@ -682,7 +721,7 @@ const pasteColumnClasses = computed(() => ({
   remark: "hidden sm:table-cell",
   created_at: "hidden md:table-cell",
   expires_at: "hidden lg:table-cell",
-  password: "hidden sm:table-cell",
+  is_public: "hidden sm:table-cell",
   remaining_views: "",
   created_by: "hidden lg:table-cell",
   actions: "",

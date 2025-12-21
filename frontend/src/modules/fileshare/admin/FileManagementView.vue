@@ -12,20 +12,7 @@
           @click.prevent="loadFiles"
           :disabled="loading"
         >
-          <svg xmlns="http://www.w3.org/2000/svg" :class="['h-3 w-3 sm:h-4 sm:w-4 mr-1', loading ? 'animate-spin' : '']" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path
-              v-if="!loading"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              stroke-width="2"
-              d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
-            />
-            <template v-else>
-              <circle cx="12" cy="12" r="10"></circle>
-              <path d="m16 12-4-4-4 4"></path>
-              <path d="M12 16V8"></path>
-            </template>
-          </svg>
+          <IconRefresh class="h-3 w-3 sm:h-4 sm:w-4 mr-1" :class="loading ? 'animate-spin' : ''" />
           <span class="hidden xs:inline">刷新</span>
           <span class="xs:hidden">刷新</span>
         </button>
@@ -80,14 +67,7 @@
               selectedFiles.length === 0 ? 'bg-gray-300 text-gray-500 cursor-not-allowed' : 'text-white bg-red-600 hover:bg-red-700 focus:ring-red-500',
             ]"
           >
-            <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 sm:h-4 sm:w-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                stroke-width="2"
-                d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
-              />
-            </svg>
+            <IconDelete class="h-3 w-3 sm:h-4 sm:w-4 mr-1" />
             <span class="hidden xs:inline">批量删除{{ selectedFiles.length ? ` (${selectedFiles.length})` : "" }}</span>
             <span class="xs:hidden">删除{{ selectedFiles.length ? ` (${selectedFiles.length})` : "" }}</span>
           </button>
@@ -95,18 +75,11 @@
       </div>
     </div>
 
-    <!-- 错误消息提示 -->
-    <div v-if="error" class="mb-4 p-3 bg-red-100 text-red-600 rounded">
-      <p>{{ error }}</p>
-    </div>
-
     <!-- 上次刷新时间显示 -->
     <div class="flex justify-between items-center mb-2 sm:mb-3" v-if="lastRefreshTime">
       <div class="text-xs sm:text-sm text-gray-500 dark:text-gray-400">
         <span class="inline-flex items-center">
-          <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 sm:h-4 sm:w-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-          </svg>
+          <IconClock class="h-3 w-3 sm:h-4 sm:w-4 mr-1" />
           上次刷新: {{ lastRefreshTime }}
         </span>
       </div>
@@ -114,10 +87,7 @@
 
     <!-- 加载中指示器 -->
     <div v-if="loading" class="flex justify-center my-8">
-      <svg class="animate-spin h-8 w-8" :class="darkMode ? 'text-blue-400' : 'text-blue-500'" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-      </svg>
+      <IconRefresh class="animate-spin h-8 w-8" :class="darkMode ? 'text-blue-400' : 'text-blue-500'" />
     </div>
 
     <!-- 数据展示区域 -->
@@ -128,8 +98,6 @@
           :dark-mode="darkMode"
           :selected-files="selectedFiles"
           :user-type="props.userType"
-          :copied-files="copiedFiles"
-          :copied-permanent-files="copiedPermanentFiles"
           :loading="loading || searchLoading"
           @toggle-select="toggleSelectItem"
           @toggle-select-all="toggleSelectAll"
@@ -139,6 +107,7 @@
           @generate-qr="(file) => generateQRCode(file, darkMode)"
           @copy-link="copyFileLink"
           @copy-permanent-link="copyPermanentLink"
+          @error="showError"
         />
       </div>
     </div>
@@ -172,12 +141,23 @@
 
     <!-- 二维码弹窗 -->
     <QRCodeModal v-if="showQRCodeModal" :qr-code-url="qrCodeDataURL" :file-slug="qrCodeSlug" :dark-mode="darkMode" @close="showQRCodeModal = false" />
+
+    <!-- 确认对话框 -->
+    <ConfirmDialog
+      v-bind="dialogState"
+      @confirm="handleConfirm"
+      @cancel="handleCancel"
+    />
   </div>
 </template>
 
 <script setup>
 import { onMounted, ref } from "vue";
+import { useI18n } from "vue-i18n";
 import { useFileManagement } from "@/modules/fileshare/admin/useFileManagement.js";
+import { useThemeMode } from "@/composables/core/useThemeMode.js";
+import { useConfirmDialog } from "@/composables/core/useConfirmDialog.js";
+import { IconClock, IconDelete, IconRefresh } from "@/components/icons";
 
 // 导入子组件
 import FileTable from "@/modules/fileshare/admin/components/FileTable.vue";
@@ -186,17 +166,13 @@ import FileEditModal from "@/components/file/FileEditModal.vue";
 import FilePreviewModal from "@/modules/fileshare/admin/components/FilePreviewModal.vue";
 import QRCodeModal from "@/modules/fileshare/admin/components/QRCodeModal.vue";
 import GlobalSearchBox from "@/components/common/GlobalSearchBox.vue";
+import ConfirmDialog from "@/components/common/dialogs/ConfirmDialog.vue";
 
 /**
  * 组件接收的属性定义
- * darkMode: 主题模式
  * userType: 用户类型，'admin'或'apikey'
  */
 const props = defineProps({
-  darkMode: {
-    type: Boolean,
-    required: true,
-  },
   userType: {
     type: String,
     default: "admin", // 默认为管理员
@@ -204,11 +180,32 @@ const props = defineProps({
   },
 });
 
+/**
+ * 使用主题模式 composable
+ */
+const { isDarkMode: darkMode } = useThemeMode();
+
+// 国际化
+const { t } = useI18n();
+
+// 确认对话框
+const { dialogState, confirm, handleConfirm, handleCancel } = useConfirmDialog();
+
+// 创建适配确认函数，用于传递给 composable
+const confirmFn = async ({ title, message, confirmType }) => {
+  return await confirm({
+    title,
+    message,
+    confirmType,
+    confirmText: t("common.dialogs.deleteButton"),
+    darkMode: darkMode.value,
+  });
+};
+
 // 使用文件管理composable
 const {
   // 状态
   loading,
-  error,
   selectedItems: selectedFiles,
   lastRefreshTime,
   pagination,
@@ -221,8 +218,6 @@ const {
   showQRCodeModal,
   qrCodeDataURL,
   qrCodeSlug,
-  copiedFiles,
-  copiedPermanentFiles,
 
   // 方法
   loadFiles,
@@ -237,6 +232,7 @@ const {
   generateQRCode,
   copyFileLink,
   copyPermanentLink,
+  showError,
   getFilePassword,
   getOfficePreviewUrl,
   previewFileInNewWindow,
@@ -246,7 +242,7 @@ const {
   toggleSelectItem,
   toggleSelectAll,
   clearSelection,
-} = useFileManagement(props.userType);
+} = useFileManagement(props.userType, { confirmFn });
 
 // 需要在模板中使用的删除设置store
 import { useDeleteSettingsStore } from "@/stores/deleteSettingsStore.js";

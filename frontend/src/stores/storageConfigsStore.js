@@ -23,6 +23,17 @@ const STORAGE_TYPE_SCHEMA = {
       preview: "signed-url",
     },
   },
+  ONEDRIVE: {
+    type: "ONEDRIVE",
+    label: "OneDrive 存储",
+    description: "基于 Microsoft OneDrive / Graph API 的云存储，支持预签名直传",
+    capabilities: {
+      multipart: false,
+      presigned: true,
+      requiresProxy: false,
+      preview: "signed-url",
+    },
+  },
   WEBDAV: {
     type: "WEBDAV",
     label: "WebDAV",
@@ -38,6 +49,39 @@ const STORAGE_TYPE_SCHEMA = {
     type: "LOCAL",
     label: "本地存储",
     description: "直接挂载服务器本地磁盘，通常仅用于自托管",
+    capabilities: {
+      multipart: false,
+      presigned: false,
+      requiresProxy: true,
+      preview: "proxy",
+    },
+  },
+  GOOGLE_DRIVE: {
+    type: "GOOGLE_DRIVE",
+    label: "Google Drive 存储",
+    description: "基于 Google Drive API 的云存储，支持 sharedWithMe 视图与单会话分片上传",
+    capabilities: {
+      multipart: true,
+      presigned: false,
+      requiresProxy: true,
+      preview: "proxy",
+    },
+  },
+  GITHUB_API: {
+    type: "GITHUB_API",
+    label: "GitHub API 存储",
+    description: "将 GitHub 仓库映射为可读写文件系统（Contents + Git Database API）",
+    capabilities: {
+      multipart: false,
+      presigned: false,
+      requiresProxy: true,
+      preview: "proxy",
+    },
+  },
+  GITHUB_RELEASES: {
+    type: "GITHUB_RELEASES",
+    label: "GitHub Releases 存储",
+    description: "只读：将 GitHub Releases 的资产与 Source code 作为文件列表挂载",
     capabilities: {
       multipart: false,
       presigned: false,
@@ -129,7 +173,7 @@ export const useStorageConfigsStore = defineStore("storageConfigs", () => {
     return [];
   };
 
-  const setConfigs = (list = []) => {
+  const replaceConfigs = (list = []) => {
     configs.value = Array.isArray(list) ? list : [];
     lastLoadedAt.value = Date.now();
   };
@@ -155,7 +199,7 @@ export const useStorageConfigsStore = defineStore("storageConfigs", () => {
       .getStorageConfigs({ limit })
       .then((response) => {
         const normalized = normalizeResponse(response);
-        setConfigs(normalized);
+        replaceConfigs(normalized);
         return configs.value;
       })
       .catch((err) => {
@@ -205,7 +249,13 @@ export const useStorageConfigsStore = defineStore("storageConfigs", () => {
 
   const getStorageTypeMeta = (type) => {
     if (!type) return STORAGE_TYPE_SCHEMA.UNKNOWN;
-    return STORAGE_TYPE_SCHEMA[type] || STORAGE_TYPE_SCHEMA.UNKNOWN;
+    if (STORAGE_TYPE_SCHEMA[type]) return STORAGE_TYPE_SCHEMA[type];
+    // 未在 schema 中登记的类型：显示原始 type，避免界面出现“未指定类型”造成误解
+    return {
+      ...STORAGE_TYPE_SCHEMA.UNKNOWN,
+      type,
+      label: type,
+    };
   };
 
   const getStorageTypeLabel = (type) => getStorageTypeMeta(type).label;
@@ -238,6 +288,7 @@ export const useStorageConfigsStore = defineStore("storageConfigs", () => {
     loadConfigs,
     refreshConfigs,
     invalidateCache,
+    replaceConfigs,
     getConfigById,
     getDefaultConfigId,
     upsertConfig,

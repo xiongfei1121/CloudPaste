@@ -89,6 +89,8 @@ export async function listMultipartUploads(fs, path, userIdOrInfo, userType, opt
   return await driver.listMultipartUploads(subPath, {
     mount,
     db: fs.mountManager.db,
+    userIdOrInfo,
+    userType,
     ...options,
   });
 }
@@ -108,6 +110,8 @@ export async function listMultipartParts(fs, path, uploadId, fileName, userIdOrI
     mount,
     db: fs.mountManager.db,
     fileName,
+    userIdOrInfo,
+    userType,
     ...options,
   });
 }
@@ -126,31 +130,10 @@ export async function refreshMultipartUrls(fs, path, uploadId, partNumbers, user
   return await driver.refreshMultipartUrls(subPath, uploadId, partNumbers, {
     mount,
     db: fs.mountManager.db,
+    userIdOrInfo,
+    userType,
     ...options,
   });
-}
-
-export async function abortBackendMultipartUpload(fs, path, userIdOrInfo, userType, uploadId, s3Key = null) {
-  const { driver, mount, subPath } = await fs.mountManager.getDriverByPath(path, userIdOrInfo, userType);
-
-  if (!driver.hasCapability(CAPABILITIES.MULTIPART)) {
-    throw new DriverError(`存储驱动 ${driver.getType()} 不支持分片上传`, {
-      status: ApiStatus.NOT_IMPLEMENTED,
-      code: "DRIVER_ERROR.NOT_IMPLEMENTED",
-      expose: true,
-    });
-  }
-
-  const result = await driver.abortBackendMultipartUpload(path, {
-    mount,
-    subPath,
-    db: fs.mountManager.db,
-    uploadId,
-    s3Key,
-  });
-
-  fs.emitCacheInvalidation({ mount, paths: [path], reason: "abort-backend-multipart" });
-  return result;
 }
 
 

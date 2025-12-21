@@ -1,26 +1,48 @@
 <script setup>
 import { onMounted, ref } from "vue";
+import { useI18n } from "vue-i18n";
 import { usePasteManagement } from "@/modules/paste";
+import { useThemeMode } from "@/composables/core/useThemeMode.js";
+import { useCreatorBadge } from "@/composables/admin-management/useCreatorBadge.js";
+import { useConfirmDialog } from "@/composables/core/useConfirmDialog.js";
+import { IconClock, IconDelete, IconRefresh } from "@/components/icons";
 
 // 导入子组件
 import PasteTable from "@/modules/paste/admin/components/PasteTable.vue";
 import PasteCardList from "@/modules/paste/admin/components/PasteCardList.vue";
+import PasteMasonryView from "@/modules/paste/admin/components/PasteMasonryView.vue";
 import PastePreviewModal from "@/modules/paste/admin/components/PastePreviewModal.vue";
 import PasteEditModal from "@/modules/paste/admin/components/PasteEditModal.vue";
 import CommonPagination from "@/components/common/CommonPagination.vue";
 import QRCodeModal from "@/modules/fileshare/admin/components/QRCodeModal.vue";
 import GlobalSearchBox from "@/components/common/GlobalSearchBox.vue";
+import ConfirmDialog from "@/components/common/dialogs/ConfirmDialog.vue";
+import ViewModeToggle from "@/components/common/ViewModeToggle.vue";
 
 /**
- * 组件接收的属性定义
- * darkMode: 主题模式
+ * 使用主题模式 composable
  */
-const props = defineProps({
-  darkMode: {
-    type: Boolean,
-    required: true,
-  },
-});
+const { isDarkMode: darkMode } = useThemeMode();
+
+// 国际化
+const { t } = useI18n();
+
+// 创建者徽章统一逻辑
+const { formatCreator } = useCreatorBadge();
+
+// 确认对话框
+const { dialogState, confirm, handleConfirm, handleCancel } = useConfirmDialog();
+
+// 创建适配确认函数，用于传递给 composable
+const confirmFn = async ({ title, message, confirmType }) => {
+  return await confirm({
+    title,
+    message,
+    confirmType,
+    confirmText: confirmType === "warning" ? t("common.dialogs.cleanupButton") : t("common.dialogs.deleteButton"),
+    darkMode: darkMode.value,
+  });
+};
 
 // 使用文本管理composable
 const {
@@ -42,6 +64,10 @@ const {
   copiedTexts,
   copiedRawTexts,
 
+  // 视图模式
+  viewMode,
+  switchViewMode,
+
   // 权限状态
   isAdmin,
   isApiKeyUser,
@@ -62,16 +88,24 @@ const {
   submitEdit,
   copyLink,
   copyRawLink,
+  quickEditContent,
   goToViewPage,
   showQRCode,
   toggleSelectItem,
   toggleSelectAll,
+  toggleVisibility,
   clearSelection,
-} = usePasteManagement();
+} = usePasteManagement({ confirmFn });
 
 // 别名映射，用于模板中的方法调用
 const goToPage = handleOffsetChange;
 const deleteSelectedPastes = batchDeletePastes;
+
+// 视图模式选项配置
+const viewModeOptions = [
+  { value: "table", icon: "table", title: "表格视图" },
+  { value: "masonry", icon: "masonry", title: "瀑布流视图" },
+];
 
 // 全局搜索状态
 const globalSearchValue = ref("");
@@ -80,6 +114,8 @@ const globalSearchValue = ref("");
 const isSearchMode = ref(false);
 const searchResults = ref([]);
 const searchLoading = ref(false);
+
+
 
 // 搜索处理函数 - 使用服务端搜索
 const handleGlobalSearch = async (searchValue) => {
@@ -183,26 +219,6 @@ const handlePageSizeChange = (newPageSize) => {
   }
 };
 
-// 格式化创建者信息的工具函数
-const formatCreator = (paste) => {
-  if (!paste.created_by) {
-    return "系统";
-  }
-
-  // 处理API密钥创建者
-  if (paste.created_by.startsWith("apikey:")) {
-    const keyPart = paste.created_by.substring(7); // 移除"apikey:"前缀
-    return `API密钥 (${keyPart})`;
-  }
-
-  // 处理UUID格式的创建者
-  if (paste.created_by.length === 36 && paste.created_by.includes("-")) {
-    return `用户 (${paste.created_by.substring(0, 8)})`;
-  }
-
-  return paste.created_by;
-};
-
 // 组件挂载时加载数据
 onMounted(() => {
   console.log("TextManagement组件挂载");
@@ -220,35 +236,39 @@ onMounted(() => {
   <div class="p-3 sm:p-4 md:p-5 lg:p-6 flex-1 flex flex-col overflow-y-auto">
     <!-- 顶部操作栏 -->
     <div class="flex flex-col space-y-3 mb-4">
-      <!-- 标题和刷新按钮 -->
+      <!-- 标题和操作按钮组 -->
       <div class="flex justify-between items-center">
         <h2 class="text-lg sm:text-xl font-medium" :class="darkMode ? 'text-white' : 'text-gray-900'">文本管理</h2>
 
-        <!-- 刷新按钮 - 在所有屏幕尺寸显示 -->
-        <button
-          class="inline-flex items-center px-2 py-1 sm:px-3 sm:py-1.5 md:px-4 md:py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-primary-600 hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500"
-          @click="loadPastes"
-          :disabled="loading"
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" :class="['h-3 w-3 sm:h-4 sm:w-4 mr-1', loading ? 'animate-spin' : '']" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path
-              v-if="!loading"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              stroke-width="2"
-              d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
-            />
-            <circle v-if="loading" class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-            <path
-              v-if="loading"
-              class="opacity-75"
-              fill="currentColor"
-              d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-            ></path>
-          </svg>
-          <span class="hidden xs:inline">{{ loading ? "刷新中..." : "刷新" }}</span>
-          <span class="xs:hidden">{{ loading ? "..." : "刷" }}</span>
-        </button>
+        <div class="flex items-center space-x-2">
+          <!-- 视图模式切换按钮组 - 移动端 -->
+          <ViewModeToggle
+            v-model="viewMode"
+            :options="viewModeOptions"
+            :dark-mode="darkMode"
+            size="sm"
+            class="md:hidden"
+          />
+          <!-- 视图模式切换按钮组 - 桌面端 -->
+          <ViewModeToggle
+            v-model="viewMode"
+            :options="viewModeOptions"
+            :dark-mode="darkMode"
+            size="md"
+            class="hidden md:inline-flex"
+          />
+
+          <!-- 刷新按钮 - 在所有屏幕尺寸显示 -->
+          <button
+            class="inline-flex items-center px-2 py-1 sm:px-3 sm:py-1.5 md:px-4 md:py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-primary-600 hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500"
+            @click="loadPastes"
+            :disabled="loading"
+          >
+            <IconRefresh class="h-3 w-3 sm:h-4 sm:w-4 mr-1" :class="loading ? 'animate-spin' : ''" />
+            <span class="hidden xs:inline">{{ loading ? "刷新中..." : "刷新" }}</span>
+            <span class="xs:hidden">{{ loading ? "..." : "刷" }}</span>
+          </button>
+        </div>
       </div>
 
       <!-- 搜索框 -->
@@ -273,14 +293,7 @@ onMounted(() => {
           @click="clearExpiredPastes"
           title="系统会自动删除过期内容，但您也可以通过此功能手动立即清理"
         >
-          <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 sm:h-4 sm:w-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              stroke-width="2"
-              d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
-            />
-          </svg>
+          <IconDelete class="h-3 w-3 sm:h-4 sm:w-4 mr-1" />
           <span class="hidden xs:inline">清理过期</span>
           <span class="xs:hidden">清理</span>
         </button>
@@ -294,14 +307,7 @@ onMounted(() => {
           ]"
           @click="deleteSelectedPastes"
         >
-          <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 sm:h-4 sm:w-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              stroke-width="2"
-              d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
-            />
-          </svg>
+          <IconDelete class="h-3 w-3 sm:h-4 sm:w-4 mr-1" />
           <span class="hidden xs:inline">批量删除{{ selectedPastes.length ? `(${selectedPastes.length})` : "" }}</span>
           <span class="xs:hidden">删除{{ selectedPastes.length ? `(${selectedPastes.length})` : "" }}</span>
         </button>
@@ -312,19 +318,17 @@ onMounted(() => {
     <div class="flex justify-between items-center mb-2 sm:mb-3" v-if="lastRefreshTime">
       <div class="text-xs sm:text-sm text-gray-500 dark:text-gray-400">
         <span class="inline-flex items-center">
-          <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 sm:h-4 sm:w-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-          </svg>
+          <IconClock class="h-3 w-3 sm:h-4 sm:w-4 mr-1" />
           上次刷新: {{ lastRefreshTime }}
         </span>
       </div>
     </div>
 
     <!-- 数据展示区域 -->
-    <div class="overflow-hidden bg-white dark:bg-gray-800 shadow-md rounded-lg flex-1">
+    <div class="overflow-visible bg-white dark:bg-gray-800 shadow-md rounded-lg flex-1">
       <div class="flex flex-col h-full">
-        <!-- 桌面端表格组件 - 中等及以上设备显示 -->
-        <div class="hidden md:block flex-1 overflow-auto">
+        <!-- 桌面端 - 表格视图 (中等及以上设备显示) -->
+        <div v-if="viewMode === 'table'" class="hidden md:block flex-1 overflow-auto">
           <PasteTable
             :dark-mode="darkMode"
             :pastes="pastes"
@@ -341,11 +345,34 @@ onMounted(() => {
             @edit="openEditModal"
             @delete="deletePaste"
             @show-qrcode="showQRCode"
+            @toggle-visibility="toggleVisibility"
           />
         </div>
 
-        <!-- 移动端卡片组件 - 小于中等设备显示 -->
-        <div class="md:hidden flex-1 overflow-auto">
+        <!-- 桌面端 - 瀑布流视图 (中等及以上设备显示) -->
+        <div v-if="viewMode === 'masonry'" class="hidden md:block flex-1 overflow-visible">
+          <PasteMasonryView
+            :dark-mode="darkMode"
+            :pastes="pastes"
+            :selectedPastes="selectedPastes"
+            :loading="loading || searchLoading"
+            :copiedTexts="copiedTexts"
+            :copiedRawTexts="copiedRawTexts"
+            @toggle-select-all="toggleSelectAll"
+            @toggle-select-item="toggleSelectItem"
+            @view="goToViewPage"
+            @copy-link="copyLink"
+            @copy-raw-link="copyRawLink"
+            @preview="openPreview"
+            @edit="openEditModal"
+            @delete="deletePaste"
+            @show-qrcode="showQRCode"
+            @quick-edit-content="quickEditContent"
+          />
+        </div>
+
+        <!-- 移动端 - 列表视图 (小于中等设备显示) -->
+        <div v-if="viewMode === 'table'" class="md:hidden flex-1 overflow-auto">
           <PasteCardList
             :dark-mode="darkMode"
             :pastes="pastes"
@@ -361,6 +388,28 @@ onMounted(() => {
             @edit="openEditModal"
             @delete="deletePaste"
             @show-qrcode="showQRCode"
+          />
+        </div>
+
+        <!-- 移动端 - 瀑布流视图 (小于中等设备显示) -->
+        <div v-if="viewMode === 'masonry'" class="md:hidden flex-1 overflow-visible">
+          <PasteMasonryView
+            :dark-mode="darkMode"
+            :pastes="pastes"
+            :selectedPastes="selectedPastes"
+            :loading="loading || searchLoading"
+            :copiedTexts="copiedTexts"
+            :copiedRawTexts="copiedRawTexts"
+            @toggle-select-all="toggleSelectAll"
+            @toggle-select-item="toggleSelectItem"
+            @view="goToViewPage"
+            @copy-link="copyLink"
+            @copy-raw-link="copyRawLink"
+            @preview="openPreview"
+            @edit="openEditModal"
+            @delete="deletePaste"
+            @show-qrcode="showQRCode"
+            @quick-edit-content="quickEditContent"
           />
         </div>
       </div>
@@ -396,5 +445,12 @@ onMounted(() => {
 
     <!-- 二维码弹窗组件 -->
     <QRCodeModal v-if="showQRCodeModal" :qr-code-url="qrCodeDataURL" :file-slug="qrCodeSlug" :dark-mode="darkMode" @close="showQRCodeModal = false" />
+
+    <!-- 确认对话框 -->
+    <ConfirmDialog
+      v-bind="dialogState"
+      @confirm="handleConfirm"
+      @cancel="handleCancel"
+    />
   </div>
 </template>

@@ -39,17 +39,14 @@
         @load="handleLoad"
         @error="handleError"
       />
+      <!-- 缺少内容URL或加载失败 -->
+      <div v-else-if="displayedError" class="absolute inset-0 flex items-center justify-center bg-gray-100 dark:bg-gray-700">
+        <p class="text-red-600 dark:text-red-400 text-sm">{{ displayedError }}</p>
+      </div>
       <!-- 加载状态 -->
       <div v-else class="absolute inset-0 flex items-center justify-center bg-gray-100 dark:bg-gray-700">
         <div class="text-center">
-          <svg class="animate-spin h-8 w-8 text-blue-500 mx-auto mb-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-            <path
-              class="opacity-75"
-              fill="currentColor"
-              d="M4 12a8 8 0 0 1 8-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 0 0 4 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-            ></path>
-          </svg>
+          <IconRefresh class="animate-spin h-8 w-8 text-blue-500 mx-auto mb-2" />
           <p class="text-blue-600 dark:text-blue-400">{{ loadingText || t("fileView.preview.text.loading") }}</p>
         </div>
       </div>
@@ -58,8 +55,9 @@
 </template>
 
 <script setup>
-import { computed, ref, onMounted, watch } from "vue";
+import { computed, watch } from "vue";
 import { useI18n } from "vue-i18n";
+import { IconRefresh } from "@/components/icons";
 import TextRenderer from "@/components/common/text-preview/TextRenderer.vue";
 import { useFetchText } from "@/composables/text-preview/useFetchText.js";
 import { useTextPreview } from "@/composables/text-preview/useTextPreview.js";
@@ -67,7 +65,7 @@ import { useTextPreview } from "@/composables/text-preview/useTextPreview.js";
 const { t } = useI18n();
 
 const props = defineProps({
-  previewUrl: {
+  contentUrl: {
     type: String,
     required: true,
   },
@@ -109,6 +107,11 @@ const {
   emitEncodingChange: false,
 });
 
+const displayedError = computed(() => {
+  if (!props.contentUrl) return "预览 URL 不可用";
+  return error.value || "";
+});
+
 // 统计信息计算
 const lineCount = computed(() => {
   if (!textContent.value) return 0;
@@ -125,12 +128,13 @@ const { availableEncodings } = useFetchText();
 
 // 适配数据结构
 const adaptedFileData = computed(() => {
-  if (!props.previewUrl) return null;
+  if (!props.contentUrl) return null;
 
   return {
     name: props.filename || "text-file",
     filename: props.filename || "text-file",
-    preview_url: props.previewUrl,
+    // 文本内容统一通过 contentUrl 访问
+    contentUrl: props.contentUrl,
     contentType: "text/plain",
   };
 });
@@ -147,7 +151,7 @@ const loadTextContent = async () => {
 
 // 处理编码切换 - 使用统一逻辑
 const handleEncodingChange = async () => {
-  if (!adaptedFileData.value?.preview_url) return;
+  if (!adaptedFileData.value) return;
 
   await changeEncoding(currentEncoding.value, emit);
 };
@@ -163,19 +167,14 @@ const handleError = (error) => {
 
 // 监听预览URL变化
 watch(
-  () => props.previewUrl,
-  () => {
-    if (props.previewUrl) {
-      loadTextContent();
+  () => props.contentUrl,
+  (url) => {
+    if (!url) {
+      emit("error", "预览 URL 不可用");
+      return;
     }
+    loadTextContent();
   },
   { immediate: true }
 );
-
-// 组件挂载时加载内容
-onMounted(() => {
-  if (props.previewUrl) {
-    loadTextContent();
-  }
-});
 </script>

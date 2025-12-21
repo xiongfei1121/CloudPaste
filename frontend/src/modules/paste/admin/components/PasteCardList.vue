@@ -1,6 +1,11 @@
 <script setup>
 import { computed } from "vue";
+import { useCreatorBadge } from "@/composables/admin-management/useCreatorBadge.js";
+import { IconCopy, IconDelete, IconEye, IconEyeOff, IconGlobeAlt, IconLink, IconLockClosed, IconQrCode, IconRefresh, IconRename } from "@/components/icons";
+
 // 移动端的卡片列表视图
+// 创建者徽章统一逻辑
+const { formatCreator } = useCreatorBadge();
 
 /**
  * 组件接收的属性定义
@@ -63,7 +68,7 @@ const truncateText = (text, length = 10) => {
 };
 
 // 导入统一的时间处理工具
-import { formatDateTime, formatRelativeTime as formatRelativeTimeUtil, formatExpiry as formatExpiryUtil, isExpired as isExpiredUtil } from "@/utils/timeUtils.js";
+import { formatDateTime, formatExpiry as formatExpiryUtil, isExpired as isExpiredUtil } from "@/utils/timeUtils.js";
 
 /**
  * 格式化日期为本地日期时间字符串
@@ -83,27 +88,7 @@ const formatExpiry = (expiryDate) => {
   return formatExpiryUtil(expiryDate);
 };
 
-/**
- * 格式化相对时间（如：3天后过期）
- * @param {string} dateString - UTC 时间字符串
- * @returns {string} 相对时间描述
- */
-const formatRelativeTime = (dateString) => {
-  if (!dateString) return "";
-
-  const relativeTime = formatRelativeTimeUtil(dateString);
-
-  // 为过期场景添加特殊处理
-  if (relativeTime.includes("前")) {
-    return "已过期";
-  } else if (relativeTime === "即将") {
-    return "即将过期";
-  } else if (relativeTime.includes("后")) {
-    return relativeTime.replace("后", "后过期");
-  }
-
-  return relativeTime;
-};
+ 
 
 /**
  * 检查文本分享是否设置了密码
@@ -118,12 +103,28 @@ const hasPassword = (paste) => {
 import { getRemainingViews as getRemainingViewsUtil } from "@/utils/fileUtils.js";
 
 /**
- * 计算剩余可访问次数
+ * 计算剩余可访问次数（数值）
  * @param {Object} paste - 文本分享对象
- * @returns {string|number} 剩余访问次数或状态描述
+ * @returns {number} Infinity 表示无限制，0 表示已用完，正数表示剩余次数
  */
 const getRemainingViews = (paste) => {
-  return getRemainingViewsUtil(paste); // 不传t函数，使用中文
+  return getRemainingViewsUtil(paste);
+};
+
+/**
+ * 格式化剩余访问次数为展示文案
+ * @param {Object} paste - 文本分享对象
+ * @returns {string}
+ */
+const getRemainingViewsLabel = (paste) => {
+  const remaining = getRemainingViews(paste);
+  if (remaining === Infinity) {
+    return "无限制";
+  }
+  if (remaining === 0) {
+    return "已用完";
+  }
+  return `${remaining}`;
 };
 
 /**
@@ -136,39 +137,6 @@ const isExpired = (paste) => {
   return isExpiredUtil(paste.expires_at);
 };
 
-/**
- * 格式化创建者信息
- * @param {Object} paste - 文本分享对象
- * @returns {string} 格式化后的创建者信息
- */
-const formatCreator = (paste) => {
-  if (!paste.created_by) {
-    return "系统";
-  }
-
-  // 处理API密钥创建者
-  if (paste.created_by.startsWith("apikey:")) {
-    // 如果有key_name，显示密钥名称
-    if (paste.key_name) {
-      return `密钥：${paste.key_name}`;
-    }
-    // 否则显示密钥ID的缩略形式
-    const keyPart = paste.created_by.substring(7); // 移除"apikey:"前缀
-    return `密钥：${keyPart.substring(0, 5)}...`;
-  }
-
-  // 处理管理员创建者
-  if (paste.created_by === "admin") {
-    return "管理员";
-  }
-
-  // 如果是UUID格式，视为管理员创建的内容
-  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(paste.created_by)) {
-    return "管理员";
-  }
-
-  return paste.created_by;
-};
 </script>
 
 <template>
@@ -177,10 +145,7 @@ const formatCreator = (paste) => {
     <!-- 加载状态 -->
     <div v-if="loading" class="p-4 text-center" :class="darkMode ? 'text-gray-300' : 'text-gray-500'">
       <div class="flex justify-center">
-        <svg class="animate-spin h-5 w-5 text-primary-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-        </svg>
+        <IconRefresh class="animate-spin h-5 w-5 text-primary-500" />
         <span class="ml-2">加载中...</span>
       </div>
     </div>
@@ -205,17 +170,10 @@ const formatCreator = (paste) => {
             @click="$emit('view', paste.slug)"
             :class="isExpired(paste) ? 'text-red-600 dark:text-red-400' : 'text-primary-600 dark:text-primary-400'"
           >
-            {{ paste.slug }}
+            {{ paste.title || paste.remark || paste.slug }}
           </span>
           <button @click="$emit('copy-link', paste.slug)" class="ml-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 relative" title="复制链接">
-            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                stroke-width="2"
-                d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
-              />
-            </svg>
+            <IconCopy class="h-4 w-4" />
             <!-- 添加复制成功提示 -->
             <span v-if="copiedTexts[paste.id]" class="absolute -top-8 left-1/2 transform -translate-x-1/2 px-2 py-1 text-xs text-white bg-green-500 rounded whitespace-nowrap">
               已复制
@@ -223,14 +181,7 @@ const formatCreator = (paste) => {
           </button>
           <!-- 添加二维码按钮 -->
           <button @click="$emit('show-qrcode', paste.slug)" class="ml-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200" title="显示二维码">
-            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                stroke-width="2"
-                d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z"
-              />
-            </svg>
+            <IconQrCode class="h-4 w-4" />
           </button>
         </div>
 
@@ -238,49 +189,24 @@ const formatCreator = (paste) => {
         <div class="flex space-x-2">
           <!-- 预览按钮 -->
           <button class="text-primary-600 hover:text-primary-900 dark:text-primary-400 dark:hover:text-primary-300 p-1" @click="$emit('preview', paste)">
-            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-              <path
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                stroke-width="2"
-                d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"
-              />
-            </svg>
+            <IconEye class="h-5 w-5" />
           </button>
 
           <!-- 编辑按钮 -->
           <button class="text-indigo-600 hover:text-indigo-900 dark:text-indigo-400 dark:hover:text-indigo-300 p-1" @click="$emit('edit', paste)">
-            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                stroke-width="2"
-                d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"
-              />
-            </svg>
+            <IconRename class="h-5 w-5" />
           </button>
 
           <!-- 复制原始文本直链按钮 -->
-          <button class="text-purple-600 hover:text-purple-900 dark:text-purple-400 dark:hover:text-purple-300 p-1 relative" @click="$emit('copy-raw-link', paste)">
-            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101" />
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.172 13.828a4 4 0 015.656 0l4 4a4 4 0 01-5.656 5.656l-1.102-1.101" />
-            </svg>
+          <button class="text-purple-600 hover:text-purple-900 dark:text-purple-400 dark:hover:text-purple-300 p-1 relative" @click="$emit('copy-raw-link', paste.slug)">
+            <IconLink class="h-5 w-5" />
             <!-- 原始文本直链复制成功提示 -->
             <span v-if="copiedRawTexts[paste.id]" class="absolute -top-8 right-0 px-2 py-1 text-xs text-white bg-green-500 rounded whitespace-nowrap">已复制直链</span>
           </button>
 
           <!-- 删除按钮 -->
           <button class="text-red-600 hover:text-red-900 dark:text-red-400 dark:hover:text-red-300 p-1" @click="$emit('delete', paste.id)">
-            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                stroke-width="2"
-                d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
-              />
-            </svg>
+            <IconDelete class="h-5 w-5" />
           </button>
         </div>
       </div>
@@ -340,24 +266,26 @@ const formatCreator = (paste) => {
           </div>
         </div>
 
-        <!-- 状态信息 - 包含密码保护和剩余次数 -->
+        <!-- 状态信息 - 包含密码保护、可见性和剩余次数 -->
         <div class="col-span-2">
           <div class="text-gray-500 dark:text-gray-400 text-xs mb-1">状态信息</div>
           <div class="flex items-center flex-wrap gap-2">
+            <!-- 可见性标签 -->
+            <span
+              v-if="paste.is_public === false"
+              class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-200"
+            >
+              <IconEyeOff class="h-3 w-3 mr-1" />
+              仅内部
+            </span>
+
             <!-- 密码状态标签 - 已加密 -->
             <span
               v-if="hasPassword(paste)"
               class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium"
               :class="[isExpired(paste) ? 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-300' : 'bg-yellow-100 text-yellow-800 dark:bg-yellow-800 dark:text-yellow-100']"
             >
-              <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  stroke-width="2"
-                  d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"
-                />
-              </svg>
+              <IconLockClosed class="h-3 w-3 mr-1" />
               已加密
             </span>
 
@@ -367,14 +295,7 @@ const formatCreator = (paste) => {
               class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium"
               :class="[isExpired(paste) ? 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-300' : 'bg-green-100 text-green-800 dark:bg-green-800 dark:text-green-100']"
             >
-              <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  stroke-width="2"
-                  d="M8 11V7a4 4 0 118 0m-4 8v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2z"
-                />
-              </svg>
+              <IconGlobeAlt class="h-3 w-3 mr-1" />
               公开
             </span>
 
@@ -384,21 +305,13 @@ const formatCreator = (paste) => {
               :class="[
                 isExpired(paste)
                   ? 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-300'
-                  : getRemainingViews(paste) === '已用完'
+                  : getRemainingViews(paste) === 0
                   ? 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-300'
                   : 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-300',
               ]"
             >
-              <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                <path
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  stroke-width="2"
-                  d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"
-                />
-              </svg>
-              剩余 {{ getRemainingViews(paste) }}
+              <IconEye class="h-3 w-3 mr-1" />
+              剩余 {{ getRemainingViewsLabel(paste) }}
             </span>
           </div>
         </div>

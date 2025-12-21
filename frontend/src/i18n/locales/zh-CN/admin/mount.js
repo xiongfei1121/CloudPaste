@@ -33,12 +33,26 @@ export default {
       updatedAt: "更新时间",
       lastRefresh: "最后刷新",
     },
+
+    // Schema分组标题（用于动态表单布局）
+    groups: {
+      basic: "基本信息",
+      storage: "存储关联",
+      advanced: "高级设置",
+      proxy: "代理设置",
+      proxySign: "代理签名配置",
+      status: "状态",
+    },
+
     form: {
       name: "挂载点名称",
       namePlaceholder: "请输入挂载点名称",
       nameHint: "用于标识挂载点的名称",
       storageType: "存储类型",
       storageTypeHint: "选择存储后端类型",
+      selectStorageType: "请选择存储类型",
+      selectStorageTypeFirst: "请先选择存储类型",
+      noConfigsForType: "该类型暂无可用的存储配置",
       storageConfig: "存储配置",
       storageConfigPlaceholder: "请选择存储配置",
       storageConfigHint: "选择要使用的存储配置",
@@ -66,7 +80,6 @@ export default {
       },
       webdavPolicy: "WebDAV策略",
       webdavPolicyHint: "选择WebDAV访问策略",
-      storageConfig: "存储配置",
       selectStorageConfig: "请选择存储配置",
       noStorageConfig: "暂无可用的存储配置",
       storageTypes: {
@@ -77,9 +90,10 @@ export default {
       },
       webdavPolicyOptions: {
         "302_redirect": "302重定向",
+        use_proxy_url: "代理URL",
         native_proxy: "本地代理",
       },
-      webdavPolicyDescription: "作用于Webdav的下载/预览",
+      webdavPolicyDescription: "只作用于项目作为 WebDAV 挂载时的下载/预览操作",
       cacheTtlPlaceholder: "默认300秒",
       sortOrderPlaceholder: "0",
       save: "保存",
@@ -113,7 +127,7 @@ export default {
       refreshed: "数据刷新成功",
     },
     error: {
-      loadFailed: "加载挂载点列表失败",
+      loadFailed: "加载数据失败",
       createFailed: "创建挂载点失败",
       updateFailed: "更新挂载点失败",
       deleteFailed: "删除挂载点失败",
@@ -129,6 +143,13 @@ export default {
       saveFailed: "保存失败",
     },
     validation: {
+      // 通用验证消息（Schema驱动表单使用）
+      required: "{field}不能为空",
+      maxLength: "最大长度不能超过{max}个字符",
+      invalidFormat: "格式不正确",
+      min: "不能小于{min}",
+      max: "不能大于{max}",
+      // 特定字段验证消息
       nameRequired: "挂载点名称不能为空",
       nameLength: "挂载点名称长度必须在1-50个字符之间",
       storageTypeRequired: "请选择存储类型",
@@ -137,6 +158,8 @@ export default {
       mountPathFormat: "挂载路径必须以/开头",
       mountPathInvalid: "挂载路径格式不正确，必须是/xxx格式，只能包含字母、数字、下划线、连字符、中文和斜杠",
       mountPathSystemReserved: "不能使用系统保留路径",
+      namePattern: "名称只能包含中文、字母、数字、下划线和连字符",
+      mountPathPattern: "挂载路径格式不正确",
       cacheTTLInteger: "缓存时间必须是整数",
       cacheTTLNonNegative: "缓存时间不能为负数",
       cacheTTLTooLarge: "缓存时间不能超过86400秒（24小时）",

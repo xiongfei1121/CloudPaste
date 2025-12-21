@@ -1,11 +1,16 @@
 <script setup>
-import { ref, onMounted, computed, onBeforeUnmount } from "vue";
+import { ref, onMounted, computed } from "vue";
 import { useI18n } from "vue-i18n";
 import CommonPagination from "@/components/common/CommonPagination.vue";
+import ConfirmDialog from "@/components/common/dialogs/ConfirmDialog.vue";
 import { copyToClipboard } from "@/utils/clipboard";
 import { useAdminApiKeyService } from "@/modules/admin/services/apiKeyService.js";
 import { useAdminMountService } from "@/modules/admin/services/mountService.js";
 import { useGlobalMessage } from "@/composables/core/useGlobalMessage.js";
+import { useConfirmDialog } from "@/composables/core/useConfirmDialog.js";
+import { useThemeMode } from "@/composables/core/useThemeMode.js";
+import { useAdminBase } from "@/composables/admin-management/useAdminBase.js";
+import { IconClock, IconDelete, IconKey, IconRefresh } from "@/components/icons";
 
 // 导入子组件
 import KeyForm from "@/modules/admin/components/KeyForm.vue";
@@ -16,13 +21,24 @@ const { t } = useI18n();
 const { getAllApiKeys, deleteApiKey } = useAdminApiKeyService();
 const { getMountsList } = useAdminMountService();
 const { showSuccess, showError } = useGlobalMessage();
+const { isDarkMode: darkMode } = useThemeMode();
 
-// Props定义
-const props = defineProps({
-  darkMode: {
-    type: Boolean,
-    required: true,
-  },
+// 确认对话框
+const { dialogState, confirm, handleConfirm, handleCancel } = useConfirmDialog();
+
+// 管理页面基础功能（含移动端检测 + 分页）
+const {
+  isMobile,
+  lastRefreshTime,
+  updateLastRefreshTime,
+  pagination,
+  pageSizeOptions,
+  handlePaginationChange,
+  changePageSize,
+  resetPagination,
+  updatePagination,
+} = useAdminBase('key-management', {
+  mobileDetect: { breakpoint: 768 },
 });
 
 // 状态管理
@@ -30,34 +46,19 @@ const apiKeys = ref([]);
 const isLoading = ref(false);
 const showCreateModal = ref(false);
 const showEditModal = ref(false);
-const isMobile = ref(false);
-const lastRefreshTime = ref("");
 const selectedKeys = ref([]);
 const editingKey = ref(null);
 
-// 分页相关数据
-const pagination = ref({
-  page: 1,
-  limit: 10,
-  total: 0,
-  totalPages: 0,
-});
-
 // 计算当前页显示的密钥
 const currentPageKeys = computed(() => {
-  const start = (pagination.value.page - 1) * pagination.value.limit;
-  const end = start + pagination.value.limit;
-
-  // 更新总条数和总页数
-  pagination.value.total = apiKeys.value.length;
-  pagination.value.totalPages = Math.ceil(pagination.value.total / pagination.value.limit);
-
+  const start = (pagination.page - 1) * pagination.limit;
+  const end = start + pagination.limit;
   return apiKeys.value.slice(start, end);
 });
 
 // 处理页码变化
 const handlePageChange = (page) => {
-  pagination.value.page = page;
+  handlePaginationChange(page, 'page');
 };
 
 // 引用子组件
@@ -67,19 +68,6 @@ const keyTableRef = ref(null);
 // 可用挂载点列表
 const availableMounts = ref([]);
 
-// 导入统一的时间处理工具
-import { formatCurrentTime } from "@/utils/timeUtils.js";
-
-// 更新最后刷新时间
-const updateLastRefreshTime = () => {
-  lastRefreshTime.value = formatCurrentTime();
-};
-
-// 检查是否为移动设备
-const checkMobile = () => {
-  isMobile.value = window.innerWidth < 768; // md断点
-};
-
 // 加载所有API密钥
 const loadApiKeys = async () => {
   isLoading.value = true;
@@ -88,8 +76,9 @@ const loadApiKeys = async () => {
     const keys = await getAllApiKeys();
     apiKeys.value = Array.isArray(keys) ? keys : [];
 
-    // 重置为第一页
-    pagination.value.page = 1;
+    // 重置分页并更新总数
+    resetPagination();
+    updatePagination({ total: apiKeys.value.length }, 'page');
     // 更新最后刷新时间
     updateLastRefreshTime();
   } catch (e) {
@@ -181,7 +170,16 @@ const deleteSelectedKeys = async () => {
 
   const selectedCount = deletableIds.length;
 
-  if (!confirm(t("admin.keyManagement.bulkDeleteConfirm", { count: selectedCount }))) {
+  // 使用统一确认对话框
+  const confirmed = await confirm({
+    title: t("common.dialogs.deleteTitle"),
+    message: t("common.dialogs.deleteMultiple", { count: selectedCount }),
+    confirmType: "danger",
+    confirmText: t("common.dialogs.deleteButton") + ` (${selectedCount})`,
+    darkMode: darkMode.value,
+  });
+
+  if (!confirmed) {
     return;
   }
 
@@ -224,13 +222,6 @@ const handleSelectedKeysChange = (keys) => {
 onMounted(() => {
   loadApiKeys();
   loadMounts();
-  checkMobile();
-  window.addEventListener("resize", checkMobile);
-});
-
-// 组件卸载前清理
-onBeforeUnmount(() => {
-  window.removeEventListener("resize", checkMobile);
 });
 </script>
 
@@ -239,7 +230,7 @@ onBeforeUnmount(() => {
     <!-- 顶部操作栏 -->
     <div class="flex flex-col space-y-3 mb-4">
       <!-- 标题和操作按钮行 -->
-      <div class="flex flex-col sm:flex-row sm:justify-between gap-3">
+      <div class="flex flex-col sm:flex-row sm:justify-between sm:items-start gap-3">
         <h2 class="text-lg sm:text-xl font-medium" :class="darkMode ? 'text-white' : 'text-gray-900'">{{ $t("admin.keyManagement.title") }}</h2>
 
         <div class="flex flex-wrap gap-2">
@@ -249,14 +240,7 @@ onBeforeUnmount(() => {
             class="inline-flex items-center px-2 py-1 sm:px-3 sm:py-1.5 md:px-4 md:py-2 border border-transparent text-sm font-medium rounded-md shadow-sm transition-all duration-200 ease-in-out"
             :class="darkMode ? 'bg-blue-600 hover:bg-blue-700 text-white' : 'bg-blue-500 hover:bg-blue-600 text-white'"
           >
-            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                stroke-width="2"
-                d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
-              />
-            </svg>
+            <IconRefresh size="sm" class="mr-1.5" />
             <span class="hidden xs:inline">{{ $t("admin.keyManagement.refresh") }}</span>
           </button>
 
@@ -273,14 +257,7 @@ onBeforeUnmount(() => {
                 : 'bg-red-500 hover:bg-red-600 text-white',
             ]"
           >
-            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                stroke-width="2"
-                d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
-              />
-            </svg>
+            <IconDelete size="sm" class="mr-1.5" />
             <span class="hidden xs:inline">{{ $t("admin.keyManagement.bulkDelete") }}{{ selectedKeys.length ? `(${selectedKeys.length})` : "" }}</span>
             <span class="xs:hidden">{{ $t("admin.keyManagement.delete") }}{{ selectedKeys.length ? `(${selectedKeys.length})` : "" }}</span>
           </button>
@@ -291,9 +268,7 @@ onBeforeUnmount(() => {
             class="inline-flex items-center px-2 py-1 sm:px-3 sm:py-1.5 md:px-4 md:py-2 border border-transparent text-sm font-medium rounded-md shadow-sm transition-all duration-200 ease-in-out"
             :class="darkMode ? 'bg-primary-600 hover:bg-primary-700 text-white' : 'bg-primary-500 hover:bg-primary-600 text-white'"
           >
-            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
-            </svg>
+            <IconKey size="sm" class="mr-1.5" />
             <span class="hidden xs:inline">{{ $t("admin.keyManagement.create") }}</span>
             <span class="xs:hidden">{{ $t("admin.keyManagement.createShort") }}</span>
           </button>
@@ -303,9 +278,7 @@ onBeforeUnmount(() => {
       <!-- 最后刷新时间显示 -->
       <div v-if="lastRefreshTime" class="text-xs sm:text-sm" :class="darkMode ? 'text-gray-400' : 'text-gray-500'">
         <span class="inline-flex items-center">
-          <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 sm:h-4 sm:w-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-          </svg>
+          <IconClock size="sm" class="mr-1" />
           {{ $t("admin.keyManagement.lastRefreshed") }}: {{ lastRefreshTime }}
         </span>
       </div>
@@ -368,5 +341,12 @@ onBeforeUnmount(() => {
         @click.stop
       />
     </div>
+
+    <!-- 确认对话框 -->
+    <ConfirmDialog
+      v-bind="dialogState"
+      @confirm="handleConfirm"
+      @cancel="handleCancel"
+    />
   </div>
 </template>

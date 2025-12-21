@@ -1,4 +1,5 @@
 import { ref, reactive, computed } from "vue";
+import { useI18n } from "vue-i18n";
 import { usePasteService } from "@/modules/paste";
 import { copyToClipboard } from "@/utils/clipboard";
 import { useAuthStore } from "@/stores/authStore.js";
@@ -11,9 +12,21 @@ import { generateQRCode as createQRCodeImage } from "@/utils/qrcodeUtils.js";
 /**
  * 文本管理 Admin composable
  * 基于 useAdminBase + usePasteService 统一管理 Admin 文本列表的加载、删除、搜索、预览、编辑等逻辑
+ * @param {Object} options - 可选配置
+ * @param {Function} options.confirmFn - 自定义确认函数，接收 {title, message, confirmType} 参数，返回 Promise<boolean>
  */
-export function usePasteManagement() {
-  const base = useAdminBase();
+export function usePasteManagement(options = {}) {
+  const { confirmFn } = options;
+
+  // 国际化
+  const { t } = useI18n();
+
+  const base = useAdminBase('paste', {
+    viewMode: {
+      storageKey: 'paste-admin-view-mode',
+      defaultMode: 'table',
+    },
+  });
   const pasteService = usePasteService();
 
   /** @type {import("vue").Ref<Paste[]>} */
@@ -79,7 +92,19 @@ export function usePasteManagement() {
       return;
     }
 
-    if (!confirm("确认要删除该文本吗？此操作不可恢复")) {
+    // 使用传入的确认函数或默认的 window.confirm
+    let confirmed;
+    if (confirmFn) {
+      confirmed = await confirmFn({
+        title: t("common.dialogs.deleteTitle"),
+        message: t("common.dialogs.deleteItem", { name: t("paste.item", "该文本") }),
+        confirmType: "danger",
+      });
+    } else {
+      confirmed = confirm(t("common.dialogs.deleteItem", { name: t("paste.item", "该文本") }));
+    }
+
+    if (!confirmed) {
       return;
     }
 
@@ -100,7 +125,19 @@ export function usePasteManagement() {
       return;
     }
 
-    if (!confirm(`确认要删除选中的 ${selectedCount} 条文本吗？此操作不可恢复`)) {
+    // 使用传入的确认函数或默认的 window.confirm
+    let confirmed;
+    if (confirmFn) {
+      confirmed = await confirmFn({
+        title: t("common.dialogs.deleteTitle"),
+        message: t("common.dialogs.deleteMultiple", { count: selectedCount }),
+        confirmType: "danger",
+      });
+    } else {
+      confirmed = confirm(t("common.dialogs.deleteMultiple", { count: selectedCount }));
+    }
+
+    if (!confirmed) {
       return;
     }
 
@@ -121,7 +158,19 @@ export function usePasteManagement() {
       return;
     }
 
-    if (!confirm("确认要清理所有已过期文本吗？此操作不可恢复")) {
+    // 使用传入的确认函数或默认的 window.confirm
+    let confirmed;
+    if (confirmFn) {
+      confirmed = await confirmFn({
+        title: t("common.dialogs.cleanupTitle"),
+        message: t("common.dialogs.cleanupExpired"),
+        confirmType: "warning",
+      });
+    } else {
+      confirmed = confirm(t("common.dialogs.cleanupExpired"));
+    }
+
+    if (!confirmed) {
       return;
     }
 
@@ -133,12 +182,19 @@ export function usePasteManagement() {
   };
 
   /**
-   * 打开预览弹窗
+   * 打开预览弹窗并加载完整内容
    * @param {Paste} paste
    */
-  const openPreview = (paste) => {
-    previewPaste.value = paste;
-    showPreview.value = true;
+  const openPreview = async (paste) => {
+    try {
+      // 加载完整的文本详情（包含 content 字段）
+      const detail = await pasteService.getPasteById(paste.id);
+      previewPaste.value = detail;
+      showPreview.value = true;
+    } catch (err) {
+      console.error("获取文本详情失败:", err);
+      base.showError("获取文本详情失败");
+    }
   };
 
   const closePreview = () => {
@@ -167,6 +223,50 @@ export function usePasteManagement() {
   };
 
   /**
+   * 通用的文本更新方法
+   * @param {string} pasteId - 文本ID
+   * @param {Partial<Paste>} updates - 要更新的字段（支持部分更新）
+   * @param {string} successMessage - 成功提示消息
+   * @returns {Promise<void>}
+   */
+  const updatePasteFields = async (pasteId, updates, successMessage = "更新成功") => {
+    return base.withLoading(async () => {
+      try {
+        // 获取完整数据（列表数据不包含content字段）
+        const fullPaste = await pasteService.getPasteById(pasteId);
+
+        // 合并更新数据（使用 ?? 空值合并，保持原值）
+        const payload = {
+          title: updates.title ?? fullPaste.title,
+          content: updates.content ?? fullPaste.content,
+          remark: updates.remark ?? fullPaste.remark,
+          max_views: updates.max_views ?? fullPaste.max_views,
+          expires_at: updates.expires_at ?? fullPaste.expires_at,
+          is_public: updates.is_public ?? fullPaste.is_public,
+        };
+
+        // 处理特殊字段
+        if (Object.prototype.hasOwnProperty.call(updates, "newSlug")) {
+          payload.newSlug = updates.newSlug;
+        }
+        if (updates.password) {
+          payload.password = updates.password;
+        } else if (updates.clearPassword) {
+          payload.clearPassword = true;
+        }
+
+        await pasteService.updatePaste(fullPaste.slug, payload);
+        base.showSuccess(successMessage);
+        await loadPastes();
+      } catch (err) {
+        console.error("更新文本失败:", err);
+        base.showError(err.message || "更新文本失败");
+        throw err;
+      }
+    });
+  };
+
+  /**
    * 提交编辑修改
    * @param {Partial<Paste>} updated
    */
@@ -181,51 +281,19 @@ export function usePasteManagement() {
       return;
     }
 
-    return base.withLoading(async () => {
-      try {
-        const payload = {
-          content: updated.content ?? editingPaste.value.content,
-          remark: updated.remark ?? editingPaste.value.remark,
-          max_views: updated.max_views ?? editingPaste.value.max_views,
-          expires_at: updated.expires_at ?? editingPaste.value.expires_at,
-        };
-
-        if (Object.prototype.hasOwnProperty.call(updated, "newSlug")) {
-          payload.newSlug = updated.newSlug;
-        }
-
-        if (updated.password) {
-          payload.password = updated.password;
-        } else if (updated.clearPassword) {
-          payload.clearPassword = true;
-        }
-
-        await pasteService.updatePaste(editingPaste.value.slug, payload);
-        base.showSuccess("更新成功");
-        await loadPastes();
-        closeEditModal();
-      } catch (err) {
-        console.error("更新文本失败:", err);
-        base.showError(err.message || "更新文本失败");
-      }
-    });
+    try {
+      await updatePasteFields(editingPaste.value.id, updated, "更新成功");
+      closeEditModal();
+    } catch (err) {
+      // 错误已在 updatePasteFields 中处理
+    }
   };
 
   /**
    * 复制访问链接
-   * @param {Paste} paste
+   * @param {string} slug - 文本标识
    */
-  const resolvePasteContext = (payload) => {
-    if (!payload) return { slug: "", id: null };
-    if (typeof payload === "string") {
-      const found = pastes.value.find((item) => item.slug === payload);
-      return { slug: payload, id: found?.id ?? null };
-    }
-    return { slug: payload.slug || "", id: payload.id ?? null };
-  };
-
-  const copyLink = async (payload) => {
-    const { slug, id } = resolvePasteContext(payload);
+  const copyLink = async (slug) => {
     if (!slug) {
       base.showError("复制失败：缺少文本标识");
       return;
@@ -237,11 +305,10 @@ export function usePasteManagement() {
     try {
       const ok = await copyToClipboard(link);
       if (ok) {
-        const key = id ?? slug;
-        copiedTexts[key] = true;
+        copiedTexts[slug] = true;
         base.showSuccess("访问链接已复制");
         setTimeout(() => {
-          copiedTexts[key] = false;
+          copiedTexts[slug] = false;
         }, 2000);
       } else {
         base.showError("复制访问链接失败");
@@ -254,22 +321,25 @@ export function usePasteManagement() {
 
   /**
    * 复制 Raw 链接
-   * @param {Paste} paste
+   * @param {string} slug - 文本标识
    */
-  const copyRawLink = async (paste) => {
-    if (!paste || !paste.slug) {
+  const copyRawLink = async (slug) => {
+    if (!slug) {
       base.showError("复制失败：缺少文本标识");
       return;
     }
 
+    // 从列表中查找完整对象以获取 plain_password
+    const pasteObj = pastes.value.find((item) => item.slug === slug);
+
     try {
-      const rawLink = pasteService.getRawPasteUrl(paste.slug, paste.plain_password || null);
+      const rawLink = pasteService.getRawPasteUrl(slug, pasteObj?.plain_password || null);
       const ok = await copyToClipboard(rawLink);
       if (ok) {
-        copiedRawTexts[paste.slug] = true;
+        copiedRawTexts[slug] = true;
         base.showSuccess("Raw 链接已复制");
         setTimeout(() => {
-          copiedRawTexts[paste.slug] = false;
+          copiedRawTexts[slug] = false;
         }, 2000);
       } else {
         base.showError("复制 Raw 链接失败");
@@ -277,6 +347,48 @@ export function usePasteManagement() {
     } catch (err) {
       console.error("复制 Raw 链接失败:", err);
       base.showError("复制 Raw 链接失败");
+    }
+  };
+
+  /**
+   * 快速编辑内容（双击编辑功能）
+   * @param {Object} payload - { id, slug, content }
+   */
+  const quickEditContent = async (payload) => {
+    if (!payload || !payload.id || !payload.slug || !payload.content) {
+      base.showError("编辑失败：缺少必要参数");
+      return;
+    }
+
+    try {
+      // 获取完整数据（列表数据不包含content字段）
+      const fullPaste = await pasteService.getPasteById(payload.id);
+
+      // 合并更新数据（只更新 content 字段）
+      const updatePayload = {
+        title: fullPaste.title,
+        content: payload.content,
+        remark: fullPaste.remark,
+        max_views: fullPaste.max_views,
+        expires_at: fullPaste.expires_at,
+        is_public: fullPaste.is_public,
+      };
+
+      // 调用 API 更新
+      await pasteService.updatePaste(fullPaste.slug, updatePayload);
+
+      // 局部更新：直接修改对象属性
+      const index = pastes.value.findIndex((p) => p.id === payload.id);
+      if (index !== -1) {
+        // 直接修改属性而不是替换对象（避免触发整个列表重新渲染）
+        pastes.value[index].content = payload.content;
+      }
+
+      base.showSuccess("内容已更新");
+    } catch (err) {
+      console.error("更新文本内容失败:", err);
+      base.showError(err.message || "更新文本内容失败");
+      throw err;
     }
   };
 
@@ -365,6 +477,27 @@ export function usePasteManagement() {
   };
 
   /**
+   * 切换文本可见性
+   * @param {Paste} paste
+   */
+  const toggleVisibility = async (paste) => {
+    if (!paste || !paste.id) {
+      base.showError("操作失败：缺少文本标识");
+      return;
+    }
+
+    const newVisibility = !paste.is_public;
+    const visibilityText = newVisibility ? "公开" : "私密";
+
+    try {
+      // 复用通用更新方法，只更新 is_public 字段
+      await updatePasteFields(paste.id, { is_public: newVisibility }, `已切换为${visibilityText}`);
+    } catch (err) {
+      // 错误已在 updatePasteFields 中处理
+    }
+  };
+
+  /**
    * 关闭所有弹窗
    */
   const closeAllModals = () => {
@@ -412,9 +545,11 @@ export function usePasteManagement() {
     submitEdit,
     copyLink,
     copyRawLink,
+    quickEditContent,
     goToViewPage,
     showQRCode,
     toggleSelectAll,
+    toggleVisibility,
     closeAllModals,
   };
 }

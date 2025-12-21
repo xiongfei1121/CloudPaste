@@ -5,6 +5,8 @@ import { usePolicy } from "../security/policies/policies.js";
 import { resolvePrincipal } from "../security/helpers/principal.js";
 import { getEncryptionSecret } from "../utils/environmentUtils.js";
 import { FileShareService } from "../services/fileShareService.js";
+import { LinkService } from "../storage/link/LinkService.js";
+import { getFileBySlug, getPublicFileInfo } from "../services/fileService.js";
 import { useRepositories } from "../utils/repositories.js";
 import { getQueryBool, getQueryInt, jsonOk } from "../utils/common.js";
 
@@ -13,7 +15,13 @@ const requireFilesCreate = usePolicy("files.create");
 const router = new Hono();
 
 
-// “直传即分享”
+const parseFormData = async (c, next) => {
+  const formData = await c.req.formData();
+  c.set("formData", formData);
+  await next();
+};
+
+// “直传即分享”（storage-first，S3 直传）
 router.put("/api/upload-direct/:filename", requireFilesCreate, async (c) => {
   const db = c.env.DB;
   const encryptionSecret = getEncryptionSecret(c);
@@ -37,6 +45,7 @@ router.put("/api/upload-direct/:filename", requireFilesCreate, async (c) => {
   const declaredLength = declaredLengthHeader ? parseInt(declaredLengthHeader, 10) : 0;
 
   const storageConfigId = c.req.query("storage_config_id") || null;
+  const uploadId = c.req.query("upload_id") || null;
 
   const shareParams = {
     storage_config_id: storageConfigId,
@@ -47,7 +56,6 @@ router.put("/api/upload-direct/:filename", requireFilesCreate, async (c) => {
     expiresIn: getQueryInt(c, "expires_in", 0),
     maxViews: getQueryInt(c, "max_views", 0),
     override: getQueryBool(c, "override", false),
-    // 仅当显式提供 use_proxy 时才传递，否则交由记录层按系统默认处理
     useProxy: c.req.query("use_proxy") != null ? getQueryBool(c, "use_proxy", true) : undefined,
     originalFilename: getQueryBool(c, "original_filename", false),
     contentType: c.req.header("content-type") || undefined,
@@ -60,6 +68,184 @@ router.put("/api/upload-direct/:filename", requireFilesCreate, async (c) => {
     filename,
     bodyStream,
     declaredLength,
+    userIdOrInfo,
+    userType,
+    { ...shareParams, uploadId: uploadId || null }
+  );
+
+  // 对齐 /api/share/get/:slug：统一返回公开文件信息（含 previewUrl/downloadUrl/linkType/documentPreview），不再返回分享页 URL
+  // upload-direct 属于受信任调用场景：
+  // - 即使设置了密码，这里也视为“已通过校验”，始终返回 preview/download 入口，方便调用方直接使用
+  // - 对于代理模式（share 内容路由），自动在预览/下载 URL 上附加 password 查询参数
+  try {
+    const file = await getFileBySlug(db, result.slug, encryptionSecret);
+    const hasPassword = !!file.password;
+    const linkService = new LinkService(db, encryptionSecret, repositoryFactory);
+    const link = await linkService.getShareExternalLink(file, null);
+    const requestUrl = new URL(c.req.url);
+    const publicInfo = await getPublicFileInfo(
+      db,
+      file,
+      false,
+      link,
+      encryptionSecret,
+      { baseOrigin: requestUrl.origin },
+    );
+
+    // 如果是代理模式且本次上传提供了密码，为预览/下载 URL 附加 password 查询参数
+    let previewUrl = publicInfo.previewUrl || null;
+    let downloadUrl = publicInfo.downloadUrl || null;
+    const linkType = publicInfo.linkType || null;
+    const password = shareParams.password || null;
+    if (password && (linkType === "proxy" || file.use_proxy)) {
+      if (previewUrl && !previewUrl.includes("password=")) {
+        const separator = previewUrl.includes("?") ? "&" : "?";
+        previewUrl = `${previewUrl}${separator}password=${encodeURIComponent(password)}`;
+      }
+      if (downloadUrl && !downloadUrl.includes("password=")) {
+        const separator = downloadUrl.includes("?") ? "&" : "?";
+        downloadUrl = `${downloadUrl}${separator}password=${encodeURIComponent(password)}`;
+      }
+    }
+
+    const response = {
+      ...publicInfo,
+      previewUrl,
+      downloadUrl,
+      requires_password: hasPassword,
+    };
+
+    return jsonOk(c, response, "文件上传成功");
+  } catch (error) {
+    // 兜底：生成公开信息失败时，返回基础分享记录但移除 url 字段，避免泄露分享页 URL
+    console.warn("upload-direct: 生成公开文件信息失败，将返回基础分享记录：", error);
+    const { url, ...rest } = result || {};
+    return jsonOk(c, rest, "文件上传成功");
+  }
+});
+
+// 流式分享上传：通过 PUT /api/share/upload 使用原始 body 直传
+router.put("/api/share/upload", requireFilesCreate, async (c) => {
+  const db = c.env.DB;
+  const encryptionSecret = getEncryptionSecret(c);
+  const repositoryFactory = useRepositories(c);
+
+  const principalInfo = resolvePrincipal(c, { allowedTypes: [UserType.ADMIN, UserType.API_KEY] });
+  const { type: userType, userId, apiKeyInfo } = principalInfo;
+  const userIdOrInfo = userType === UserType.ADMIN ? userId : apiKeyInfo;
+
+  const bodyStream = c.req.raw?.body;
+  if (!bodyStream) {
+    throw new ValidationError("请求体为空");
+  }
+
+  const declaredLengthHeader = c.req.header("content-length");
+  const declaredLength = declaredLengthHeader ? parseInt(declaredLengthHeader, 10) : 0;
+
+  const filenameHeaderRaw = c.req.header("x-share-filename");
+  if (!filenameHeaderRaw) {
+    throw new ValidationError("缺少 x-share-filename 头部");
+  }
+
+  let filenameHeader = filenameHeaderRaw;
+  try {
+    filenameHeader = decodeURIComponent(filenameHeaderRaw);
+  } catch {
+    // 解码失败时回退到原始值，避免影响兼容性
+    filenameHeader = filenameHeaderRaw;
+  }
+
+  let options = {};
+  const optionsHeader = c.req.header("x-share-options");
+  if (optionsHeader) {
+    try {
+      const decoded = Buffer.from(optionsHeader, "base64").toString("utf8");
+      options = JSON.parse(decoded) || {};
+    } catch {
+      options = {};
+    }
+  }
+
+  const storageConfigId = options.storage_config_id || null;
+  const uploadId = options.upload_id || null;
+
+  const shareParams = {
+    storage_config_id: storageConfigId,
+    path: options.path || null,
+    slug: options.slug || null,
+    remark: options.remark || "",
+    password: options.password || null,
+    expiresIn: Number(options.expires_in || 0),
+    maxViews: Number(options.max_views || 0),
+    override: false,
+    useProxy: options.use_proxy !== undefined ? !!options.use_proxy : undefined,
+    originalFilename: !!options.original_filename,
+    contentType: c.req.header("content-type") || undefined,
+    request: c.req.raw,
+    uploadId: uploadId || null,
+  };
+
+  const shareService = new FileShareService(db, encryptionSecret, repositoryFactory);
+
+  const result = await shareService.uploadDirectToStorageAndShare(
+    filenameHeader,
+    bodyStream,
+    declaredLength,
+    userIdOrInfo,
+    userType,
+    shareParams
+  );
+
+  return jsonOk(c, result, "文件上传成功");
+});
+
+// 通用分享上传：通过 ObjectStore + File，多存储通用
+router.post("/api/share/upload", requireFilesCreate, parseFormData, async (c) => {
+  const db = c.env.DB;
+  const encryptionSecret = getEncryptionSecret(c);
+  const repositoryFactory = useRepositories(c);
+
+  const formData = c.get("formData");
+  const file = formData.get("file");
+  if (!file) {
+    throw new ValidationError("缺少文件参数");
+  }
+
+  const storageConfigId = formData.get("storage_config_id") || null;
+  const path = formData.get("path") || null;
+  const slug = formData.get("slug") || null;
+  const remark = formData.get("remark") || "";
+  const password = formData.get("password") || null;
+  const expiresIn = Number(formData.get("expires_in") || 0);
+  const maxViews = Number(formData.get("max_views") || 0);
+  const useProxyRaw = formData.get("use_proxy");
+  const originalFilenameRaw = formData.get("original_filename");
+  const uploadId = formData.get("upload_id") || null;
+
+  const principalInfo = resolvePrincipal(c, { allowedTypes: [UserType.ADMIN, UserType.API_KEY] });
+  const { type: userType, userId, apiKeyInfo } = principalInfo;
+  const userIdOrInfo = userType === UserType.ADMIN ? userId : apiKeyInfo;
+
+  const shareService = new FileShareService(db, encryptionSecret, repositoryFactory);
+
+  const shareParams = {
+    storage_config_id: storageConfigId,
+    path: path || null,
+    slug: slug || null,
+    remark,
+    password,
+    expiresIn,
+    maxViews,
+    override: false,
+    useProxy:useProxyRaw === "true"? true: useProxyRaw === "false"? false: undefined,
+    originalFilename: originalFilenameRaw === "true",
+    contentType: file.type || undefined,
+    request: c.req.raw,
+    uploadId: uploadId || null,
+  };
+
+  const result = await shareService.uploadFileViaObjectStoreAndShare(
+    file,
     userIdOrInfo,
     userType,
     shareParams
@@ -181,50 +367,4 @@ router.get("/api/share/url/proxy", requireFilesCreate, async (c) => {
 });
 
 // URL → 预签名：根据URL元信息生成上传预签名
-router.post("/api/share/url/presign", requireFilesCreate, parseJsonBody, async (c) => {
-  const db = c.env.DB;
-  const encryptionSecret = getEncryptionSecret(c);
-  const repositoryFactory = useRepositories(c);
-
-  const body = c.get("jsonBody") || {};
-  const { url, path = null, storage_config_id = null } = body;
-  if (!url) {
-    throw new ValidationError("缺少URL参数");
-  }
-
-  const principalInfo = resolvePrincipal(c, { allowedTypes: [UserType.ADMIN, UserType.API_KEY] });
-  const { type: userType, userId, apiKeyInfo } = principalInfo;
-  const userIdOrInfo = userType === UserType.ADMIN ? userId : apiKeyInfo;
-
-  const shareService = new FileShareService(db, encryptionSecret, repositoryFactory);
-
-  // 1) 元信息（可被调用方覆盖）
-  const meta = await shareService.validateUrlMetadata(url);
-  const filename = body.filename || meta.filename || "download";
-  const contentType = body.contentType || meta.contentType || "application/octet-stream";
-  const fileSize = typeof body.fileSize === "number" ? body.fileSize : (meta.size || undefined);
-
-  // 2) 生成预签名
-  const presign = await shareService.createPresignedShareUpload({
-    filename,
-    fileSize,
-    contentType,
-    path,
-    storage_config_id,
-    userIdOrInfo,
-    userType,
-  });
-
-  // 返回给客户端：presign + 元数据 + 提交建议
-  const commitSuggestion = {
-    key: presign.key,
-    storage_config_id: presign.storage_config_id || storage_config_id || null,
-    filename,
-    size: fileSize || null,
-    etag: null, // 客户端 PUT 完成后从响应头获取
-  };
-
-  return jsonOk(c, { presign, metadata: meta, commit_suggestion: commitSuggestion }, "URL 预签名生成成功");
-});
-
 export default router;

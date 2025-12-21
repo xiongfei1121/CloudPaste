@@ -127,6 +127,15 @@ const routes = [
         },
       },
       {
+        path: "fs-meta-management",
+        name: "AdminFsMetaManagement",
+        component: createOfflineAwareImport(() => import("../modules/admin/views/FsMetaManagementView.vue"), "元信息管理"),
+        meta: {
+          title: "元信息管理 - CloudPaste",
+          adminOnly: true, // 只有管理员可访问
+        },
+      },
+      {
         path: "storage",
         name: "AdminStorage",
         component: createOfflineAwareImport(() => import("../modules/admin/views/StorageConfigView.vue"), "存储管理"),
@@ -139,6 +148,33 @@ const routes = [
         path: "storage-config",
         redirect: { name: "AdminStorage" },
         meta: {
+          adminOnly: true,
+        },
+      },
+      {
+        path: "scheduled-jobs",
+        name: "AdminScheduledJobs",
+        component: createOfflineAwareImport(() => import("../modules/admin/views/ScheduledJobsView.vue"), "定时任务管理"),
+        meta: {
+          title: "定时任务管理 - CloudPaste",
+          adminOnly: true, // 只有管理员可访问
+        },
+      },
+      {
+        path: "scheduled-jobs/create",
+        name: "AdminScheduledJobCreate",
+        component: createOfflineAwareImport(() => import("../modules/admin/views/ScheduledJobFormView.vue"), "创建定时任务"),
+        meta: {
+          title: "创建定时任务 - CloudPaste",
+          adminOnly: true,
+        },
+      },
+      {
+        path: "scheduled-jobs/:id/edit",
+        name: "AdminScheduledJobEdit",
+        component: createOfflineAwareImport(() => import("../modules/admin/views/ScheduledJobFormView.vue"), "编辑定时任务"),
+        meta: {
+          title: "编辑定时任务 - CloudPaste",
           adminOnly: true,
         },
       },
@@ -158,6 +194,15 @@ const routes = [
         meta: {
           title: "数据备份 - CloudPaste",
           adminOnly: true, // 只有管理员可访问
+        },
+      },
+      {
+        path: "tasks",
+        name: "AdminTasks",
+        component: createOfflineAwareImport(() => import("../modules/admin/views/AdminTasksView.vue"), "任务管理"),
+        meta: {
+          title: "任务管理 - CloudPaste",
+          requiredPermissions: ["mount"],
         },
       },
       {
@@ -272,6 +317,21 @@ const router = createRouter({
   },
 });
 
+const normalizeFsPathForMountExplorer = (path) => {
+  const raw = typeof path === "string" && path ? path : "/";
+  const withLeading = raw.startsWith("/") ? raw : `/${raw}`;
+  const collapsed = withLeading.replace(/\/{2,}/g, "/");
+  if (collapsed === "/") return "/";
+  return collapsed.replace(/\/+$/, "");
+};
+
+const buildMountExplorerRoutePath = (fsPath) => {
+  const normalized = normalizeFsPathForMountExplorer(fsPath);
+  if (normalized === "/") return "/mount-explorer";
+  const segments = normalized.replace(/^\/+/, "").split("/").filter(Boolean);
+  return `/mount-explorer/${segments.map((seg) => encodeURIComponent(seg)).join("/")}`;
+};
+
 // 配置NProgress - 遵循官方默认值
 NProgress.configure({
   showSpinner: false, // 隐藏旋转器
@@ -346,8 +406,9 @@ router.beforeEach(async (to, from, next) => {
       await authStore.initialize();
     }
 
-    // 自动游客会话：在未认证且非 /admin 路由时尝试一次基于 Guest API Key 的登录
-    if (!authStore.isAuthenticated && authStore.authType === "none" && !to.path.startsWith("/admin")) {
+    // 自动游客会话：在首次未认证状态下尝试一次基于 Guest API Key 的登录
+    // 统一在任意路由入口触发一次（包括 /admin 相关路由），由 maybeAutoGuestLogin 自身通过 guestAutoTried 控制只尝试一次
+    if (!authStore.isAuthenticated && authStore.authType === "none") {
       if (typeof authStore.maybeAutoGuestLogin === "function") {
         await authStore.maybeAutoGuestLogin();
       }
@@ -403,8 +464,8 @@ router.beforeEach(async (to, from, next) => {
         console.log("路由守卫：用户权限详情", {
           authType: authStore.authType,
           isAdmin: authStore.isAdmin,
-          hasTextPermission: authStore.hasTextPermission,
-          hasFilePermission: authStore.hasFilePermission,
+          hasTextSharePermission: authStore.hasTextSharePermission,
+          hasFileSharePermission: authStore.hasFileSharePermission,
           hasMountPermission: authStore.hasMountPermission,
           apiKeyPermissions: authStore.apiKeyPermissions,
         });
@@ -428,8 +489,8 @@ router.beforeEach(async (to, from, next) => {
             targetRoute: to.name,
             userPermissions: {
               isAdmin: authStore.isAdmin,
-              hasTextPermission: authStore.hasTextPermission,
-              hasFilePermission: authStore.hasFilePermission,
+              hasTextManagePermission: authStore.hasTextManagePermission,
+              hasFileManagePermission: authStore.hasFileManagePermission,
               hasMountPermission: authStore.hasMountPermission,
             },
           });
@@ -463,8 +524,8 @@ router.beforeEach(async (to, from, next) => {
         isAdmin: authStore.isAdmin,
         authType: authStore.authType,
         isGuest: authStore.isGuest,
-        hasTextPermission: authStore.hasTextPermission,
-        hasFilePermission: authStore.hasFilePermission,
+        hasTextManagePermission: authStore.hasTextManagePermission,
+        hasFileManagePermission: authStore.hasFileManagePermission,
         hasMountPermission: authStore.hasMountPermission,
       });
     }
@@ -487,7 +548,7 @@ router.beforeEach(async (to, from, next) => {
         if (!authStore.hasPathPermission(requestedPath)) {
           console.log("路由守卫：用户无此路径权限，重定向到基本路径");
           const basePath = authStore.userInfo.basicPath || "/";
-          const redirectPath = basePath === "/" ? "/mount-explorer" : `/mount-explorer${basePath}`;
+          const redirectPath = buildMountExplorerRoutePath(basePath);
           NProgress.done();
           next({ path: redirectPath });
           return;
@@ -566,6 +627,9 @@ router.afterEach(async (to, from) => {
       case "AdminMountManagement":
         title = `${t("pageTitle.adminModules.mountManagement")} - ${siteTitle}`;
         break;
+      case "AdminFsMetaManagement":
+        title = `${t("pageTitle.adminModules.fsMetaManagement")} - ${siteTitle}`;
+        break;
       case "AdminKeyManagement":
         title = `${t("pageTitle.adminModules.keyManagement")} - ${siteTitle}`;
         break;
@@ -586,6 +650,12 @@ router.afterEach(async (to, from) => {
         break;
       case "AdminSiteSettings":
         title = `${t("pageTitle.adminModules.siteSettings")} - ${siteTitle}`;
+        break;
+      case "AdminBackup":
+        title = `${t("pageTitle.adminModules.backup")} - ${siteTitle}`;
+        break;
+      case "AdminTasks":
+        title = `${t("pageTitle.adminModules.tasks")} - ${siteTitle}`;
         break;
       case "PasteView":
         title = `${t("pageTitle.pasteViewSubtitle")} - ${siteTitle}`;
@@ -670,23 +740,8 @@ export const routerUtils = {
 
       // 特殊处理 mount-explorer 的路径参数
       if (page === "mount-explorer") {
-        const query = {};
-        let routePath = "/mount-explorer";
-
-        // 处理路径参数
-        if (options.path && options.path !== "/") {
-          const normalizedPath = options.path.replace(/^\/+|\/+$/g, "");
-          if (normalizedPath) {
-            routePath = `/mount-explorer/${normalizedPath}`;
-          }
-        }
-
-        // 处理预览文件参数
-        if (options.previewFile) {
-          query.preview = options.previewFile;
-        }
-
-        router.push({ path: routePath, query });
+        const routePath = buildMountExplorerRoutePath(options.path || "/");
+        router.push({ path: routePath });
         return;
       }
 

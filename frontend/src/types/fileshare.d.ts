@@ -15,6 +15,9 @@ export interface FileshareItem {
   passwordVerified?: boolean;
   currentPassword?: string | null;
   use_proxy?: boolean;
+  previewUrl?: string | null;
+  downloadUrl?: string | null;
+  linkType?: "direct" | "proxy" | "url_proxy";
   created_at?: string;
   updated_at?: string;
 }
@@ -23,4 +26,3 @@ export interface FileshareListResponse {
   files: FileshareItem[];
   pagination: PaginationInfo;
 }
-

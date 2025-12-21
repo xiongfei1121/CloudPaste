@@ -9,6 +9,7 @@ import systemRoutes from "./routes/systemRoutes.js";
 import mountRoutes from "./routes/mountRoutes.js";
 import webdavRoutes from "./routes/webdavRoutes.js";
 import fsRoutes from "./routes/fsRoutes.js";
+import fsMetaRoutes from "./routes/fsMetaRoutes.js";
 import { DbTables, ApiStatus, UserType } from "./constants/index.js";
 import { createErrorResponse, jsonOk } from "./utils/common.js";
 import filesRoutes from "./routes/filesRoutes.js";
@@ -16,6 +17,8 @@ import shareUploadRoutes from "./routes/shareUploadRoutes.js";
 import pastesRoutes from "./routes/pastesRoutes.js";
 import fileViewRoutes from "./routes/fileViewRoutes.js";
 import { fsProxyRoutes } from "./routes/fsProxyRoutes.js";
+import { proxyLinkRoutes } from "./routes/proxyLinkRoutes.js";
+import scheduledRoutes from "./routes/scheduledRoutes.js";
 import { securityContext } from "./security/middleware/securityContext.js";
 import { withRepositories } from "./utils/repositories.js";
 import { errorBoundary } from "./http/middlewares/errorBoundary.js";
@@ -126,6 +129,7 @@ app.use("*", async (c, next) => {
         "Content-Type",
         "Authorization",
         "X-API-KEY",
+        "X-FS-Path-Token",
         "Depth",
         "Destination",
         "Overwrite",
@@ -134,8 +138,14 @@ app.use("*", async (c, next) => {
         "If-Modified-Since",
         "If-Unmodified-Since",
         "Lock-Token",
+        "Content-Range",
         "Content-Length",
         "X-Requested-With",
+        // FS / Share 流式上传自定义头
+        "X-FS-Filename",
+        "X-FS-Options",
+        "X-Share-Filename",
+        "X-Share-Options",
       ],
       allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PROPFIND", "PROPPATCH", "MKCOL", "COPY", "MOVE", "LOCK", "UNLOCK", "HEAD"],
       exposeHeaders: ["ETag", "Content-Length", "Content-Disposition", "Content-Range", "Accept-Ranges"],
@@ -180,7 +190,10 @@ app.route("/", systemRoutes);
 app.route("/", mountRoutes);
 app.route("/", webdavRoutes);
 app.route("/", fsRoutes);
+app.route("/", fsMetaRoutes);
 app.route("/", fsProxyRoutes);
+app.route("/", proxyLinkRoutes);
+app.route("/", scheduledRoutes);
 
 // 健康检查路由
 app.get("/api/health", (c) => {

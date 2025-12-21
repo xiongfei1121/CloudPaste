@@ -5,7 +5,11 @@
 
     <!-- 加载状态覆盖层 -->
     <div v-if="loading" class="loading-overlay">
-      <div class="loading-spinner"></div>
+      <div
+        class="animate-spin h-8 w-8 mb-4 rounded-full border-4 border-current border-t-transparent"
+        :class="darkMode ? 'text-primary-500' : 'text-primary-600'"
+        aria-hidden="true"
+      />
       <p class="loading-text">{{ $t("textPreview.loadingMarkdown") }}</p>
     </div>
 
@@ -18,15 +22,11 @@
 </template>
 
 <script setup>
-import { ref, watch, onMounted, onBeforeUnmount, nextTick } from "vue";
+import { ref, watch, onMounted, onBeforeUnmount, onActivated, onDeactivated, nextTick } from "vue";
 import { useI18n } from "vue-i18n";
+import { loadVditor, VDITOR_ASSETS_BASE } from "@/utils/vditorLoader.js";
 
 const { t } = useI18n();
-
-// 懒加载Vditor和CSS
-let VditorClass = null;
-let vditorCSSLoaded = false;
-let vditorLoading = false; // 状态锁
 
 // Props
 const props = defineProps({
@@ -49,98 +49,26 @@ const error = ref(null);
 const rendered = ref(false);
 const markdownContainer = ref(null);
 const isDestroyed = ref(false);
+const isActive = ref(true);
+let renderVersion = 0;
 
 /**
- * 懒加载 VditorJS
+ * 检查组件是否应该继续执行异步操作
+ * @param {number} version - 发起操作时的版本号
+ * @returns {boolean} - 是否应该继续
  */
-const loadVditor = async () => {
-  // 等待逻辑
-  if (vditorLoading) {
-    // 等待加载完成
-    while (vditorLoading) {
-      await new Promise((resolve) => setTimeout(resolve, 30));
-    }
-    return VditorClass;
-  }
-
-  if (!VditorClass) {
-    vditorLoading = true;
-
-    try {
-      await loadVditorCSS();
-
-      // 从本地vditor目录加载Vditor
-      const script = document.createElement("script");
-      script.src = "/assets/vditor/dist/index.min.js";
-
-      await new Promise((resolve, reject) => {
-        script.onload = async () => {
-          //  Vditor 初始化检查
-          let retryCount = 0;
-          const maxRetries = 3;
-          const checkInterval = 30;
-
-          const checkVditorReady = () => {
-            if (window.Vditor && typeof window.Vditor.preview === "function") {
-              VditorClass = window.Vditor;
-              resolve(VditorClass);
-              return;
-            }
-
-            retryCount++;
-            if (retryCount >= maxRetries) {
-              reject(new Error("Vditor API 不可用"));
-              return;
-            }
-
-            setTimeout(checkVditorReady, checkInterval);
-          };
-
-          checkVditorReady();
-        };
-
-        script.onerror = () => {
-          reject(new Error("Vditor 脚本加载失败"));
-        };
-
-        document.head.appendChild(script);
-      });
-
-      vditorLoading = false;
-    } catch (error) {
-      vditorLoading = false;
-      throw error;
-    }
-  }
-
-  // 即使已加载也要验证可用性
-  if (VditorClass && typeof VditorClass === "function" && typeof VditorClass.preview === "function") {
-    return VditorClass;
-  } else {
-    // 重置并重新加载
-    VditorClass = null;
-    return loadVditor();
-  }
-};
-
-/**
- * 加载 VditorJS CSS
- */
-const loadVditorCSS = async () => {
-  if (!vditorCSSLoaded) {
-    const link = document.createElement("link");
-    link.rel = "stylesheet";
-    link.href = "/assets/vditor/dist/index.css";
-    document.head.appendChild(link);
-    vditorCSSLoaded = true;
-  }
+const shouldContinue = (version) => {
+  return !isDestroyed.value && isActive.value && version === renderVersion;
 };
 
 /**
  * 渲染Markdown内容
  */
 const renderMarkdown = async () => {
-  if (!props.content || isDestroyed.value) return;
+  // 递增版本号，使之前的异步操作失效
+  const currentVersion = ++renderVersion;
+
+  if (!props.content || !shouldContinue(currentVersion)) return;
 
   try {
     loading.value = true;
@@ -150,9 +78,9 @@ const renderMarkdown = async () => {
     // 确保DOM更新后再初始化Vditor
     await nextTick();
 
-    // 更严格的组件状态检查
-    if (isDestroyed.value || !markdownContainer.value) {
-      console.warn("MarkdownDisplay组件已销毁或DOM不存在，跳过渲染");
+    // 更严格的组件状态检查（包含版本检查）
+    if (!shouldContinue(currentVersion) || !markdownContainer.value) {
+      console.warn("MarkdownDisplay组件已销毁/隐藏或DOM不存在，跳过渲染");
       return;
     }
 
@@ -169,10 +97,15 @@ const renderMarkdown = async () => {
       throw new Error(`Vditor 加载失败: ${loadError.message}`);
     }
 
-    // 再次检查组件状态
-    if (isDestroyed.value || !markdownContainer.value) {
-      console.warn("MarkdownDisplay组件已销毁，取消Vditor渲染");
+    // 再次检查组件状态（包含版本检查）
+    if (!shouldContinue(currentVersion) || !markdownContainer.value) {
+      console.warn("MarkdownDisplay组件已销毁/隐藏，取消Vditor渲染");
       return;
+    }
+
+    // 检查 Vditor 是否有效
+    if (!VditorConstructor || typeof VditorConstructor.preview !== "function") {
+      throw new Error("Vditor.preview 方法不可用");
     }
 
     try {
@@ -181,9 +114,9 @@ const renderMarkdown = async () => {
         mode: "dark-light", // 支持明暗主题
         theme: {
           current: props.darkMode ? "dark" : "light", // 根据darkMode设置主题
-          path: "/assets/vditor/dist/css/content-theme",
+          path: `${VDITOR_ASSETS_BASE}/dist/css/content-theme`,
         },
-        cdn: "/assets/vditor",
+        cdn: VDITOR_ASSETS_BASE,
         hljs: {
           lineNumber: true, // 代码块显示行号
           style: props.darkMode ? "vs2015" : "github", // 代码高亮样式
@@ -209,9 +142,9 @@ const renderMarkdown = async () => {
           inlineDigit: true,
         },
         after: () => {
-          // 检查组件是否已被销毁
-          if (isDestroyed.value || !markdownContainer.value) {
-            console.warn("MarkdownDisplay组件已销毁，跳过after回调");
+          // 检查组件是否已被销毁/隐藏，或者是否是过期的渲染操作
+          if (!shouldContinue(currentVersion) || !markdownContainer.value) {
+            console.warn("MarkdownDisplay组件已销毁/隐藏或渲染已过期，跳过after回调");
             return;
           }
 
@@ -261,15 +194,47 @@ onMounted(() => {
   }
 });
 
+// KeepAlive 激活时（如果父组件使用 KeepAlive）
+onActivated(() => {
+  isActive.value = true;
+  if (props.content && !rendered.value) {
+    renderMarkdown();
+  }
+});
+
+// KeepAlive 停用时
+onDeactivated(() => {
+  isActive.value = false;
+  renderVersion++;
+});
+
 // 组件销毁时清理
 onBeforeUnmount(() => {
   isDestroyed.value = true;
+  isActive.value = false;
+  // 递增版本号，取消正在进行的渲染操作
+  renderVersion++;
 
   // 清理 DOM
   if (markdownContainer.value) {
     markdownContainer.value.innerHTML = "";
   }
   console.log("MarkdownDisplay组件销毁");
+});
+
+defineExpose({
+  // 暂停渲染
+  pause: () => {
+    isActive.value = false;
+    renderVersion++;
+  },
+  // 恢复渲染
+  resume: () => {
+    isActive.value = true;
+    if (props.content && !rendered.value) {
+      renderMarkdown();
+    }
+  },
 });
 </script>
 
@@ -301,24 +266,9 @@ onBeforeUnmount(() => {
   z-index: 10;
 }
 
-.loading-spinner {
-  width: 2rem;
-  height: 2rem;
-  border: 2px solid #e5e7eb;
-  border-top: 2px solid #3b82f6;
-  border-radius: 50%;
-  animation: spin 1s linear infinite;
-  margin-bottom: 1rem;
-}
-
 .loading-text {
   color: #6b7280;
   font-size: 0.875rem;
-}
-
-.markdown-display-dark .loading-spinner {
-  border-color: #4b5563;
-  border-top-color: #60a5fa;
 }
 
 .markdown-display-dark .loading-overlay {
@@ -375,21 +325,11 @@ onBeforeUnmount(() => {
   border-color: #4b5563;
 }
 
-/* 动画 */
-@keyframes spin {
-  0% {
-    transform: rotate(0deg);
-  }
-  100% {
-    transform: rotate(360deg);
-  }
-}
-
 /* VditorJS相关样式 */
 :deep(.vditor-reset) {
   font-size: 1rem !important;
   line-height: 1.7 !important;
-  padding: 1.5rem !important;
+  padding: 0.5rem 1rem !important;
   transition: all 0.3s ease;
   color: v-bind('props.darkMode ? "#d4d4d4" : "#374151"') !important;
   background-color: transparent !important;

@@ -8,8 +8,12 @@ export interface FsDirectoryItem {
   size?: number;
   modified?: string;
   mimetype?: string;
-  download_url?: string;
-  preview_url?: string;
+}
+
+export interface FsResolvedMeta {
+  headerMarkdown?: string | null;
+  footerMarkdown?: string | null;
+  hidePatterns: string[];
 }
 
 export interface FsDirectoryResponse {
@@ -19,5 +23,5 @@ export interface FsDirectoryResponse {
   mount_id?: string | number;
   total?: number;
   pagination?: PaginationInfo;
+  meta?: FsResolvedMeta | null;
 }
-

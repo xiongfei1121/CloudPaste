@@ -10,14 +10,7 @@
     </div>
 
     <div v-if="error" class="error-container py-12 px-3 sm:px-6 max-w-6xl mx-auto text-center">
-      <svg xmlns="http://www.w3.org/2000/svg" class="h-16 w-16 mx-auto mb-4 text-red-600 dark:text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-        <path
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          stroke-width="1.5"
-          d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
-        />
-      </svg>
+      <IconExclamation class="h-16 w-16 mx-auto mb-4 text-red-600 dark:text-red-500" />
       <h2 class="text-2xl font-bold mb-2 text-gray-900 dark:text-white">{{ t("fileView.error") }}</h2>
       <p class="text-lg mb-6 text-gray-600 dark:text-gray-300">{{ error }}</p>
       <a
@@ -30,9 +23,7 @@
 
     <!-- 删除成功提示 -->
     <div v-else-if="showDeleteSuccess" class="success-container py-12 px-3 sm:px-6 max-w-6xl mx-auto text-center">
-      <svg xmlns="http://www.w3.org/2000/svg" class="h-16 w-16 mx-auto mb-4 text-green-600 dark:text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M5 13l4 4L19 7" />
-      </svg>
+      <IconCheck class="h-16 w-16 mx-auto mb-4 text-green-600 dark:text-green-500" />
       <h2 class="text-2xl font-bold mb-2 text-gray-900 dark:text-white">{{ t("fileView.actions.deleteSuccess") }}</h2>
       <p class="text-lg mb-6 text-gray-600 dark:text-gray-300">{{ t("fileView.actions.redirectMessage") }}</p>
       <div class="animate-pulse text-gray-500 dark:text-gray-400">{{ redirectCountdown }} {{ t("fileView.actions.redirecting") }}</div>
@@ -45,17 +36,17 @@
 
     <div v-else class="file-container flex-1 flex flex-col py-8 px-4 max-w-4xl mx-auto w-full">
       <!-- 密码验证界面 -->
-      <div v-if="requiresPassword && !fileUrls.previewUrl" class="password-container flex-1 flex items-start justify-center pt-8">
+      <div v-if="requiresPassword" class="password-container flex-1 flex items-start justify-center pt-8">
         <FileViewPassword :fileId="fileInfo.slug" @verified="handlePasswordVerified" />
       </div>
 
       <!-- 文件信息和操作界面 -->
       <div v-else class="file-content flex flex-col flex-1">
         <!-- 文件信息 -->
-        <FileViewInfo :fileInfo="fileInfo" :fileUrls="fileUrls" class="flex-1 flex flex-col" :darkMode="darkMode" />
+        <FileViewInfo :fileInfo="fileInfo" class="flex-1 flex flex-col" :darkMode="darkMode" />
 
         <!-- 文件操作按钮 -->
-        <FileViewActions :fileInfo="fileInfo" :fileUrls="fileUrls" :darkMode="darkMode" @edit="openEditModal" @delete="handleFileDeleted" @refresh-file-info="refreshFileInfo" />
+        <FileViewActions :fileInfo="fileInfo" :darkMode="darkMode" @edit="openEditModal" @delete="handleFileDeleted" @refresh-file-info="refreshFileInfo" />
       </div>
 
       <!-- 编辑模态框 (仅管理员可见) -->
@@ -73,6 +64,7 @@ import { useAuthStore } from "@/stores/authStore.js";
 import { useFileshareService } from "@/modules/fileshare/fileshareService.js";
 import { useFileShareStore } from "@/modules/fileshare/fileShareStore.js";
 import { useGlobalMessage } from "@/composables/core/useGlobalMessage.js";
+import { IconCheck, IconExclamation } from "@/components/icons";
 
 const { t } = useI18n();
 const fileshareService = useFileshareService();
@@ -102,10 +94,6 @@ const route = useRoute();
 // 状态变量
 const slug = ref(props.slug);
 const fileInfo = ref({});
-const fileUrls = ref({
-  previewUrl: "",
-  downloadUrl: "",
-});
 const loading = ref(true);
 const error = ref("");
 const requiresPassword = ref(false);
@@ -167,20 +155,7 @@ const loadFileInfo = async (force = false) => {
       slug: fileSlug,
     };
 
-    if (data.requires_password) {
-      requiresPassword.value = true;
-      fileUrls.value = {
-        previewUrl: "",
-        downloadUrl: "",
-      };
-    } else {
-      requiresPassword.value = false;
-
-      fileUrls.value = {
-        previewUrl: fileshareService.getPermanentPreviewUrl(fileInfo.value),
-        downloadUrl: fileshareService.getPermanentDownloadUrl(fileInfo.value),
-      };
-    }
+    requiresPassword.value = !!data.requires_password;
   } catch (err) {
     console.error("加载文件信息失败:", err);
     error.value = err.message || t("fileView.errors.loadFailed");
@@ -204,11 +179,6 @@ const handlePasswordVerified = (data) => {
 
   fileInfo.value = updated;
 
-  fileUrls.value = {
-    previewUrl: fileshareService.getPermanentPreviewUrl(updated),
-    downloadUrl: fileshareService.getPermanentDownloadUrl(updated),
-  };
-
   if (data.currentPassword) {
     try {
       sessionStorage.setItem(`file_password_${fileInfo.value.slug}`, data.currentPassword);
@@ -230,15 +200,22 @@ const openEditModal = async () => {
   try {
     // 只有当文件有ID时才尝试获取详情
     if (fileInfo.value.id) {
+      const prev = fileInfo.value;
       const detail = await fileShareStore.fetchById(fileInfo.value.id, { useCache: false });
+      // 合并数据时，只保留运行时状态字段，不保留可编辑字段
       fileInfo.value = {
         ...detail,
-        slug: fileInfo.value.slug,
-        type: fileInfo.value.type,
-        requires_password: fileInfo.value.requires_password,
-        passwordVerified: fileInfo.value.passwordVerified,
-        currentPassword: fileInfo.value.currentPassword,
-        use_proxy: fileInfo.value.use_proxy,
+        // 保留运行时状态字段
+        slug: prev.slug,
+        type: prev.type,
+        requires_password: prev.requires_password,
+        passwordVerified: prev.passwordVerified,
+        currentPassword: prev.currentPassword,
+        // 移除 use_proxy 的旧值保留，使用从后端获取的最新值
+        previewUrl: prev.previewUrl,
+        downloadUrl: prev.downloadUrl,
+        linkType: prev.linkType,
+        documentPreview: prev.documentPreview,
       };
     }
 

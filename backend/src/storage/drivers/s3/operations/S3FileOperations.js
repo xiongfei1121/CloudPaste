@@ -4,14 +4,23 @@
  */
 
 import { AppError, NotFoundError, ConflictError, ValidationError, S3DriverError } from "../../../../http/errors.js";
-import { generatePresignedUrl, createS3Client } from "../utils/s3Utils.js";
-import { S3Client, GetObjectCommand, PutObjectCommand, DeleteObjectCommand, ListObjectsV2Command, CopyObjectCommand } from "@aws-sdk/client-s3";
+import { generateDownloadUrl, createS3Client } from "../utils/s3Utils.js";
+import {
+  S3Client,
+  GetObjectCommand,
+  PutObjectCommand,
+  DeleteObjectCommand,
+  ListObjectsV2Command,
+  CopyObjectCommand,
+  HeadObjectCommand,
+} from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { getMimeTypeFromFilename } from "../../../../utils/fileUtils.js";
 import { handleFsError } from "../../../fs/utils/ErrorHandler.js";
 import { updateParentDirectoriesModifiedTime } from "../utils/S3DirectoryUtils.js";
 import { CAPABILITIES } from "../../../interfaces/capabilities/index.js";
-import { GetFileType, getFileTypeName } from "../../../../utils/fileTypeDetector.js";
-import { FILE_TYPES, FILE_TYPE_NAMES } from "../../../../constants/index.js";
+import { buildFileInfo } from "../../../utils/FileInfoBuilder.js";
+import { createHttpStreamDescriptor } from "../../../streaming/StreamDescriptorUtils.js";
 
 export class S3FileOperations {
   /**
@@ -29,101 +38,89 @@ export class S3FileOperations {
   }
 
   /**
-   * 从S3获取文件内容
+   * 从S3获取文件内容（返回 StorageStreamDescriptor）
    * @param {Object} s3Config - S3配置对象
    * @param {string} s3SubPath - S3子路径
    * @param {string} fileName - 文件名
-   * @param {boolean} forceDownload - 是否强制下载
+   * @param {boolean} forceDownload - 是否强制下载（已废弃，由上层处理）
    * @param {string} encryptionSecret - 加密密钥
-   * @param {Request} request - 请求对象，用于获取Range头
-   * @returns {Promise<Response>} 文件内容响应
+   * @param {Request} request - 请求对象（已废弃，Range 由上层处理）
+   * @returns {Promise<import('../../../streaming/types.js').StorageStreamDescriptor>} 流描述对象
    */
   async getFileFromS3(s3Config, s3SubPath, fileName, forceDownload = false, encryptionSecret, request = null) {
+    const s3Client = await createS3Client(s3Config, encryptionSecret);
+    const key = s3SubPath.startsWith("/") ? s3SubPath.slice(1) : s3SubPath;
+
+    // 先获取文件元数据
+    let metadata;
     try {
-      const s3Client = await createS3Client(s3Config, encryptionSecret);
-
-      // 构建GetObject参数
-      const getParams = {
+      const headCommand = new HeadObjectCommand({
         Bucket: s3Config.bucket_name,
-        Key: s3SubPath.startsWith("/") ? s3SubPath.slice(1) : s3SubPath,
-      };
-
-      // 处理Range请求（用于视频流等）
-      if (request) {
-        const rangeHeader = request.headers.get("range");
-        if (rangeHeader) {
-          getParams.Range = rangeHeader;
-          console.log(`[S3FileOperations] Range请求: ${rangeHeader} -> ${s3SubPath}`);
-        }
-      }
-
-      // 使用AWS SDK v3的GetObjectCommand
-      const getCommand = new GetObjectCommand(getParams);
-      const response = await s3Client.send(getCommand);
-
-      // 获取内容类型
-      const contentType = response.ContentType || getMimeTypeFromFilename(fileName);
-
-      // 构建响应头
-      const headers = new Headers();
-      headers.set("Content-Type", contentType);
-      headers.set("Content-Length", response.ContentLength?.toString() || "0");
-
-      // 检查是否为Range请求响应
-      const contentRange = response.ContentRange;
-      const isRangeResponse = !!contentRange;
-
-      // 设置缓存控制 - Range请求使用较短的缓存时间
-      if (isRangeResponse) {
-        headers.set("Cache-Control", "public, max-age=3600"); // Range请求1小时缓存
-      }
-
-      // 处理下载
-      if (forceDownload) {
-        headers.set("Content-Disposition", `attachment; filename="${encodeURIComponent(fileName)}"`);
-      } else {
-        // 对于某些文件类型，设置为inline显示
-        if (contentType.startsWith("image/") || contentType.startsWith("video/") || contentType === "application/pdf") {
-          headers.set("Content-Disposition", `inline; filename="${encodeURIComponent(fileName)}"`);
-        }
-      }
-
-      // 处理Range响应 - 确保传递所有Range相关头部
-      if (contentRange) {
-        headers.set("Content-Range", contentRange);
-        console.log(`[S3FileOperations] Range响应: ${contentRange}`);
-      }
-
-      // 始终设置Accept-Ranges以支持Range请求
-      headers.set("Accept-Ranges", "bytes");
-
-      // 设置ETag
-      if (response.ETag) {
-        headers.set("ETag", response.ETag);
-      }
-
-      // 设置Last-Modified
-      if (response.LastModified) {
-        headers.set("Last-Modified", response.LastModified.toUTCString());
-      }
-
-      // 返回Response，AWS SDK v3成功响应状态码为200或206
-      const statusCode = isRangeResponse ? 206 : 200;
-      return new Response(response.Body, {
-        status: statusCode,
-        headers,
+        Key: key,
       });
+      metadata = await s3Client.send(headCommand);
     } catch (error) {
-      console.error("从S3获取文件失败:", error);
-
-      if (error instanceof AppError) {
-        throw error;
-      }
       if (error?.$metadata?.httpStatusCode === 404) {
         throw new NotFoundError("文件不存在");
       }
-      throw new S3DriverError("获取文件失败", { details: { cause: error?.message } });
+      throw new S3DriverError("获取文件元数据失败", { details: { cause: error?.message } });
     }
+
+    const contentType = metadata.ContentType || getMimeTypeFromFilename(fileName);
+    const size = metadata.ContentLength ?? null;
+    const etag = metadata.ETag ?? null;
+    const lastModified = metadata.LastModified ? new Date(metadata.LastModified) : null;
+
+    // 使用统一的 HTTP 流描述构造器（Web ReadableStream）：
+    const expiresIn = 300;
+    const getUrl = await getSignedUrl(
+      s3Client,
+      new GetObjectCommand({
+        Bucket: s3Config.bucket_name,
+        Key: key,
+      }),
+      { expiresIn },
+    );
+
+    // 可选：用于 size 缺失/异常时探测 size（StorageStreaming 的 probeSize 会用到）
+    const headUrl = await getSignedUrl(
+      s3Client,
+      new HeadObjectCommand({
+        Bucket: s3Config.bucket_name,
+        Key: key,
+      }),
+      { expiresIn },
+    );
+
+    return createHttpStreamDescriptor({
+      size,
+      contentType,
+      etag,
+      lastModified,
+      supportsRange: true,
+      fetchResponse: async (signal) => {
+        return await fetch(getUrl, {
+          method: "GET",
+          signal,
+          redirect: "follow",
+        });
+      },
+      fetchRangeResponse: async (signal, rangeHeader) => {
+        return await fetch(getUrl, {
+          method: "GET",
+          headers: { Range: rangeHeader },
+          signal,
+          redirect: "follow",
+        });
+      },
+      fetchHeadResponse: async (signal) => {
+        return await fetch(headUrl, {
+          method: "HEAD",
+          signal,
+          redirect: "follow",
+        });
+      },
+    });
   }
 
   /**
@@ -163,65 +160,22 @@ export class S3FileOperations {
           // 检查是否为目录：基于Key是否以'/'结尾判断
           const isDirectory = exactMatch.Key.endsWith("/");
 
-          const fileType = isDirectory ? FILE_TYPES.FOLDER : await GetFileType(fileName, db);
-          const fileTypeName = isDirectory ? FILE_TYPE_NAMES[FILE_TYPES.FOLDER] : await getFileTypeName(fileName, db);
-          const detectedMimeType = isDirectory ? "application/x-directory" : getMimeTypeFromFilename(fileName);
+          const info = await buildFileInfo({
+            fsPath: path,
+            name: fileName,
+            isDirectory,
+            size: isDirectory ? 0 : exactMatch.Size || 0,
+            modified: exactMatch.LastModified ? exactMatch.LastModified : new Date(),
+            mimetype: isDirectory ? "application/x-directory" : getMimeTypeFromFilename(fileName),
+            mount,
+            storageType: mount.storage_type,
+            db,
+          });
 
           const result = {
-            path: path,
-            name: fileName,
-            isDirectory: isDirectory,
-            size: isDirectory ? 0 : exactMatch.Size || 0, // 目录大小为0
-            modified: exactMatch.LastModified ? exactMatch.LastModified.toISOString() : new Date().toISOString(),
-            mimetype: detectedMimeType,
+            ...info,
             etag: exactMatch.ETag ? exactMatch.ETag.replace(/"/g, "") : undefined,
-            mount_id: mount.id,
-            storage_type: mount.storage_type,
-            type: fileType, // 整数类型常量 (0-6)
-            typeName: fileTypeName, // 类型名称（用于调试）
           };
-
-          // 生成预签名URL（如果需要）
-          if (userType && userId) {
-            try {
-              const cacheOptions = {
-                userType,
-                userId,
-                enableCache: mount.cache_ttl > 0,
-              };
-
-              // 根据挂载点配置决定URL类型
-              if (!!mount.web_proxy && this.driver?.hasCapability?.(CAPABILITIES.PROXY)) {
-                // 代理模式：使用驱动的代理能力生成URL
-                try {
-                  const previewProxy = await this.driver.generateProxyUrl(path, { mount, request, download: false, db });
-                  const downloadProxy = await this.driver.generateProxyUrl(path, { mount, request, download: true, db });
-
-                  result.preview_url = previewProxy.url;
-                  result.download_url = downloadProxy.url;
-                  console.log(`为文件[${result.name}]生成代理URL: ✓预览 ✓下载`);
-                } catch (error) {
-                  console.warn(`代理URL生成失败，回退到预签名URL:`, error);
-                  // 回退到预签名URL
-                  const previewUrl = await generatePresignedUrl(this.config, s3SubPath, this.encryptionSecret, null, false, null, cacheOptions);
-                  result.preview_url = previewUrl;
-
-                  const downloadUrl = await generatePresignedUrl(this.config, s3SubPath, this.encryptionSecret, null, true, null, cacheOptions);
-                  result.download_url = downloadUrl;
-                }
-              } else {
-                // 直链模式：返回S3预签名URL
-                const previewUrl = await generatePresignedUrl(this.config, s3SubPath, this.encryptionSecret, null, false, null, cacheOptions);
-                result.preview_url = previewUrl;
-
-                const downloadUrl = await generatePresignedUrl(this.config, s3SubPath, this.encryptionSecret, null, true, null, cacheOptions);
-                result.download_url = downloadUrl;
-                console.log(`为文件[${result.name}]生成预签名URL: ✓预览 ✓下载`);
-              }
-            } catch (urlError) {
-              console.warn(`生成URL失败: ${urlError.message}`);
-            }
-          }
 
           console.log(`getFileInfo - ListObjects 成功获取文件信息: ${result.name}`);
           return result;
@@ -244,64 +198,22 @@ export class S3FileOperations {
             // 检查是否为目录：基于ContentType判断
             const isDirectory = getResponse.ContentType === "application/x-directory";
 
-            const fileType = isDirectory ? FILE_TYPES.FOLDER : await GetFileType(fileName, db);
-            const fileTypeName = isDirectory ? FILE_TYPE_NAMES[FILE_TYPES.FOLDER] : await getFileTypeName(fileName, db);
+            const info = await buildFileInfo({
+              fsPath: path,
+              name: fileName,
+              isDirectory,
+              size: isDirectory ? 0 : getResponse.ContentLength || 0,
+              modified: getResponse.LastModified ? getResponse.LastModified : new Date(),
+              mimetype: getResponse.ContentType || "application/octet-stream",
+              mount,
+              storageType: mount.storage_type,
+              db,
+            });
 
             const result = {
-              path: path,
-              name: fileName,
-              isDirectory: isDirectory,
-              size: isDirectory ? 0 : getResponse.ContentLength || 0, // 目录大小为0
-              modified: getResponse.LastModified ? getResponse.LastModified.toISOString() : new Date().toISOString(),
-              mimetype: getResponse.ContentType || "application/octet-stream", // 统一使用mimetype字段名
+              ...info,
               etag: getResponse.ETag ? getResponse.ETag.replace(/"/g, "") : undefined,
-              mount_id: mount.id,
-              storage_type: mount.storage_type,
-              type: fileType, // 整数类型常量 (0-6)
-              typeName: fileTypeName, // 类型名称（用于调试）
             };
-
-            // 生成预签名URL（如果需要）
-            if (userType && userId) {
-              try {
-                const cacheOptions = {
-                  userType,
-                  userId,
-                  enableCache: mount.cache_ttl > 0,
-                };
-
-                // 根据挂载点配置决定URL类型（兼容数据库的0/1和布尔值）
-                if (!!mount.web_proxy && this.driver?.hasCapability?.(CAPABILITIES.PROXY)) {
-                  // 代理模式：使用驱动的代理能力生成URL
-                  try {
-                    const previewProxy = await this.driver.generateProxyUrl(path, { mount, request, download: false, db });
-                    const downloadProxy = await this.driver.generateProxyUrl(path, { mount, request, download: true, db });
-
-                    result.preview_url = previewProxy.url;
-                    result.download_url = downloadProxy.url;
-                    console.log(`为文件[${result.name}]生成代理URL(GET): ✓预览 ✓下载`);
-                  } catch (error) {
-                    console.warn(`代理URL生成失败，回退到预签名URL:`, error);
-                    // 回退到预签名URL
-                    const previewUrl = await generatePresignedUrl(this.config, s3SubPath, this.encryptionSecret, null, false, null, cacheOptions);
-                    result.preview_url = previewUrl;
-
-                    const downloadUrl = await generatePresignedUrl(this.config, s3SubPath, this.encryptionSecret, null, true, null, cacheOptions);
-                    result.download_url = downloadUrl;
-                  }
-                } else {
-                  // 直链模式：返回S3预签名URL（保持现有逻辑）
-                  const previewUrl = await generatePresignedUrl(this.config, s3SubPath, this.encryptionSecret, null, false, null, cacheOptions);
-                  result.preview_url = previewUrl;
-
-                  const downloadUrl = await generatePresignedUrl(this.config, s3SubPath, this.encryptionSecret, null, true, null, cacheOptions);
-                  result.download_url = downloadUrl;
-                  console.log(`为文件[${result.name}]生成预签名URL(GET): ✓预览 ✓下载`);
-                }
-              } catch (urlError) {
-                console.warn(`生成URL失败(GET): ${urlError.message}`);
-              }
-            }
 
             console.log(`getFileInfo(GET) - 文件[${result.name}], S3 ContentType[${getResponse.ContentType}]`);
             return result;
@@ -324,8 +236,8 @@ export class S3FileOperations {
    * 下载文件
    * @param {string} s3SubPath - S3子路径
    * @param {string} fileName - 文件名
-   * @param {Request} request - 请求对象
-   * @returns {Promise<Response>} 文件响应
+   * @param {Request} request - 请求对象（已废弃，Range 由上层处理）
+   * @returns {Promise<import('../../../streaming/types.js').StorageStreamDescriptor>} 流描述对象
    */
   async downloadFile(s3SubPath, fileName, request = null) {
     return handleFsError(
@@ -339,12 +251,12 @@ export class S3FileOperations {
   }
 
   /**
-   * 生成文件预签名URL
+   * 生成文件预签名下载URL
    * @param {string} s3SubPath - S3子路径
    * @param {Object} options - 选项参数
    * @returns {Promise<Object>} 预签名URL信息
    */
-  async generatePresignedUrl(s3SubPath, options = {}) {
+  async generateDownloadUrl(s3SubPath, options = {}) {
     const { expiresIn = 604800, forceDownload = false, userType, userId, mount } = options;
 
     return handleFsError(
@@ -355,22 +267,35 @@ export class S3FileOperations {
           enableCache: mount?.cache_ttl > 0,
         };
 
-        const presignedUrl = await generatePresignedUrl(this.config, s3SubPath, this.encryptionSecret, expiresIn, forceDownload, null, cacheOptions);
+        const presignedUrl = await generateDownloadUrl(
+          this.config,
+          s3SubPath,
+          this.encryptionSecret,
+          expiresIn,
+          forceDownload,
+          null,
+          cacheOptions,
+        );
 
         // 提取文件名
         const fileName = s3SubPath.split("/").filter(Boolean).pop() || "file";
 
+        // 统一在驱动层使用 canonical 字段 url，供上层 LinkStrategy/LinkService 消费
+        const url = presignedUrl;
+        const type = this.config.custom_host ? "custom_host" : "native_direct";
+
         return {
           success: true,
-          presignedUrl: presignedUrl,
+          url,
+          type,
           name: fileName,
           expiresIn: expiresIn,
           expiresAt: new Date(Date.now() + expiresIn * 1000).toISOString(),
           forceDownload: forceDownload,
         };
       },
-      "获取文件预签名URL",
-      "获取文件预签名URL失败"
+      "获取文件下载预签名URL",
+      "获取文件下载预签名URL失败"
     );
   }
 
@@ -380,20 +305,46 @@ export class S3FileOperations {
    * @returns {Promise<boolean>} 是否存在
    */
   async exists(s3SubPath) {
+    const key = s3SubPath.startsWith("/") ? s3SubPath.slice(1) : s3SubPath;
+    const isDirectory = key === "" || key.endsWith("/");
+
+    // 文件优先使用 HEAD，避免 List 前缀误判
+    if (!isDirectory) {
+      try {
+        const headCommand = new HeadObjectCommand({
+          Bucket: this.config.bucket_name,
+          Key: key,
+        });
+        await this.s3Client.send(headCommand);
+        return true;
+      } catch (error) {
+        const status = error?.$metadata?.httpStatusCode;
+        const code = error?.name || error?.Code;
+        const notFound = status === 404 || code === "NotFound" || code === "NoSuchKey";
+        if (!notFound) {
+          // 非 404 级错误时降级为前缀检查，避免硬失败
+          console.warn("[S3FileOperations.exists] headObject fallback", error?.message || error);
+        }
+      }
+    }
+
+    // 目录或 Head 未命中的情况下，使用前缀列举兜底
     try {
+      const prefix = isDirectory ? key : `${key}/`;
       const listParams = {
         Bucket: this.config.bucket_name,
-        Prefix: s3SubPath,
+        Prefix: prefix,
         MaxKeys: 1,
       };
 
       const listCommand = new ListObjectsV2Command(listParams);
       const listResponse = await this.s3Client.send(listCommand);
 
-      // 检查是否找到精确匹配的文件
-      const exactMatch = listResponse.Contents?.find((item) => item.Key === s3SubPath);
-      return !!exactMatch;
+      const hasObject = (listResponse.Contents?.length || 0) > 0;
+      const hasPrefix = (listResponse.CommonPrefixes?.length || 0) > 0;
+      return hasObject || hasPrefix;
     } catch (error) {
+      console.warn("[S3FileOperations.exists] listObjects fallback failed", error?.message || error);
       return false;
     }
   }

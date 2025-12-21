@@ -32,6 +32,7 @@ export default {
   permissionDenied: {
     title: "权限不足",
   },
+  administrator: "管理员",
   title: {
     admin: "管理面板",
     user: "用户面板",
@@ -42,8 +43,12 @@ export default {
     fileManagement: "文件管理",
     storageConfig: "存储管理",
     mountManagement: "挂载管理",
+    fsMetaManagement: "元信息管理",
     keyManagement: "密钥管理",
     backup: "数据备份",
+    taskManagement: "任务管理",
+    tasks: "任务列表",
+    scheduledJobs: "定时任务",
     systemSettings: "系统设置",
     globalSettings: "全局设置",
     previewSettings: "预览设置",

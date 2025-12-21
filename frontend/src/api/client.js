@@ -19,18 +19,20 @@ function checkPasswordRelatedRequest(endpoint, options) {
   // 判断是否是密码验证请求（文本或文件分享的密码验证）
   const isTextPasswordVerify = endpoint.match(/^(\/)?paste\/[a-zA-Z0-9_-]+$/i) && options.method === "POST";
   const isFilePasswordVerify = endpoint.match(/^(\/)?public\/files\/[a-zA-Z0-9_-]+\/verify$/i) && options.method === "POST";
+  const isFsMetaPasswordVerify = endpoint.includes("/fs/meta/password/verify") && options.method === "POST";
   const hasPasswordInBody = options.body && (typeof options.body === "string" ? options.body.includes("password") : options.body.password);
 
   // 检查是否是修改密码请求
   const isChangePasswordRequest = endpoint.includes("/admin/change-password") && options.method === "POST";
 
-  const isPasswordVerify = (isTextPasswordVerify || isFilePasswordVerify) && hasPasswordInBody;
+  const isPasswordVerify = (isTextPasswordVerify || isFilePasswordVerify || isFsMetaPasswordVerify) && hasPasswordInBody;
 
   return {
     isPasswordVerify,
     isChangePasswordRequest,
     isTextPasswordVerify,
     isFilePasswordVerify,
+    isFsMetaPasswordVerify,
     hasPasswordInBody,
   };
 }
@@ -173,6 +175,23 @@ export async function fetchApi(endpoint, options = {}) {
       headers: Object.fromEntries([...response.headers.entries()]),
     });
 
+    // 304 Not Modified：成熟项目常用的条件请求语义（If-None-Match）
+    // - 304 无响应体，不应尝试解析 JSON
+    // - 交由上层用本地缓存数据兜底
+    if (response.status === 304) {
+      const etag = response.headers.get("etag") || response.headers.get("ETag") || null;
+      if (import.meta?.env?.DEV) {
+        console.log(`📦 API响应(${url}): 304 Not Modified`, { url, etag });
+      }
+      return {
+        success: true,
+        notModified: true,
+        status: 304,
+        etag,
+        data: null,
+      };
+    }
+
     // 首先解析响应内容
     let responseData;
     const contentType = response.headers.get("content-type");
@@ -235,12 +254,40 @@ export async function fetchApi(endpoint, options = {}) {
 
         // 判断使用的是哪种认证方式
         const authHeader = requestOptions.headers.Authorization || "";
+        const errorCode =
+          responseData && typeof responseData === "object" && typeof responseData.code === "string"
+            ? responseData.code
+            : "";
+
+        const isAuthErrorCode =
+          errorCode === "UNAUTHORIZED" ||
+          errorCode === "AUTH_ERROR" ||
+          errorCode === "AUTHENTICATION_ERROR" ||
+          errorCode === "AUTH_INVALID" ||
+          errorCode === "AUTH_EXPIRED";
 
         // 管理员令牌过期
         if (authHeader.startsWith("Bearer ")) {
-          console.log("管理员令牌验证失败，执行登出");
-          await logoutViaBridge();
-          const error = new Error("管理员会话已过期，请重新登录");
+          // 仅在明确的认证错误场景下才执行登出：
+          // - 后端返回的 code 表明是认证问题
+          // - 或请求命中了 /admin 登录态相关接口
+          const isAdminAuthEndpoint = endpoint.startsWith("/admin") || endpoint.includes("/admin/");
+
+          if (isAuthErrorCode || isAdminAuthEndpoint) {
+            console.log("管理员令牌验证失败，执行登出");
+            await logoutViaBridge();
+            const error = new Error("管理员会话已过期，请重新登录");
+            error.__logged = true;
+            throw error;
+          }
+
+          // 对于非认证类 401（例如存储驱动或业务错误），保留会话，仅抛出业务错误
+          const errorMessage =
+            responseData && typeof responseData === "object" && responseData.message
+              ? responseData.message
+              : "请求未授权，但当前管理员会话仍保持，请检查配置或稍后重试";
+
+          const error = new Error(errorMessage);
           error.__logged = true;
           throw error;
         }
@@ -299,6 +346,12 @@ export async function fetchApi(endpoint, options = {}) {
         console.error(`❌ API错误(${url}):`, responseData);
         const error = new Error(responseData.message || `HTTP错误 ${response.status}: ${response.statusText}`);
         error.__logged = true;
+        if (responseData.code) {
+          error.code = responseData.code;
+        }
+        if (Object.prototype.hasOwnProperty.call(responseData, "data")) {
+          error.data = responseData.data;
+        }
         throw error;
       }
 
@@ -333,8 +386,14 @@ export async function fetchApi(endpoint, options = {}) {
   } catch (error) {
     // 处理不同类型的错误
     if (error.name === "AbortError") {
-      console.warn(`⏹️ API请求被取消(${url}):`, error.message);
-      throw new Error("请求被取消或超时");
+      // 请求被主动取消时，静默处理，不抛出错误
+      console.log(`⏹️ API请求被取消(${url})`);
+      // 创建一个特殊的 AbortError 对象，让调用方可以识别
+      const abortError = new Error("请求已取消");
+      abortError.name = "AbortError";
+      abortError.__aborted = true;
+      abortError.__logged = true;
+      throw abortError;
     } else if (error.name === "TimeoutError") {
       console.error(`⏰ API请求超时(${url}):`, error.message);
       throw new Error("请求超时，服务器响应时间过长");

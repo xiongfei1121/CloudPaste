@@ -18,9 +18,7 @@ export function useFilePreviewExtensions(
   handleKeyDown,
   emit,
   authenticatedPreviewUrl,
-  previewTimeoutId,
-  microsoftOfficePreviewUrl,
-  googleDocsPreviewUrl
+  previewTimeoutId
 ) {
   const { t } = useI18n();
 
@@ -80,7 +78,7 @@ export function useFilePreviewExtensions(
    * 音频错误事件处理
    */
   const handleAudioError = (error) => {
-    // 忽略Service Worker相关的误报错误
+    // 忽略Service Worker相关的误报错误（基于当前预览URL）
     if (error?.target?.src?.includes(window.location.origin) && previewUrl.value?.startsWith("https://")) {
       console.log("🎵 忽略Service Worker相关的误报错误，音频实际可以正常播放");
       return;
@@ -109,19 +107,17 @@ export function useFilePreviewExtensions(
 
     try {
       isGeneratingPreview.value = true;
-      console.log("开始生成S3直链预览...");
+      console.log("开始生成直链/代理预览...");
 
-      // 直接使用文件信息中的preview_url字段（S3直链）
-      if (file.value.preview_url) {
-        console.log("S3直链预览使用文件信息中的preview_url:", file.value.preview_url);
-        window.open(file.value.preview_url, "_blank");
-        console.log("S3直链预览成功");
-        return;
+      const baseUrl = previewUrl.value;
+      if (!baseUrl) {
+        throw new Error("当前文件缺少可用的预览URL");
       }
 
-      // 如果没有preview_url，说明后端有问题
-      console.error("S3直链预览：文件信息中没有preview_url字段，请检查后端getFileInfo实现");
-      throw new Error("文件信息中缺少preview_url字段");
+      console.log("直链/代理预览使用原始URL:", baseUrl);
+      window.open(baseUrl, "_blank");
+      console.log("预览成功");
+      return;
     } catch (error) {
       console.error("S3直链预览失败:", error);
       emit("show-message", {
@@ -222,12 +218,6 @@ export function useFilePreviewExtensions(
     if (previewTimeoutId && previewTimeoutId.value) {
       clearTimeout(previewTimeoutId.value);
       previewTimeoutId.value = null;
-    }
-    if (microsoftOfficePreviewUrl) {
-      microsoftOfficePreviewUrl.value = "";
-    }
-    if (googleDocsPreviewUrl) {
-      googleDocsPreviewUrl.value = "";
     }
 
     console.log("文件预览扩展功能清理完成");

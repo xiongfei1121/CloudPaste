@@ -1,10 +1,20 @@
 import { useStorageConfigsStore } from "@/stores/storageConfigsStore.js";
 import { DRIVER_TYPES, DriverResolutionError } from "./types.js";
 import { S3Driver } from "./s3/S3Driver.js";
+import { WebDavDriver } from "./webdav/WebDavDriver.js";
+import { LocalDriver } from "./local/LocalDriver.js";
+import { OneDriveDriver } from "./onedrive/OneDriveDriver.js";
+import { GoogleDriveDriver } from "./googledrive/GoogleDriveDriver.js";
+import { GithubApiDriver } from "./githubApi/GithubApiDriver.js";
 
 // 存储驱动工厂
 const driverFactories = new Map([
   [DRIVER_TYPES.S3, (config) => new S3Driver(config)],
+  [DRIVER_TYPES.WEBDAV, (config) => new WebDavDriver(config)],
+  [DRIVER_TYPES.LOCAL, (config) => new LocalDriver(config)],
+  [DRIVER_TYPES.ONEDRIVE, (config) => new OneDriveDriver(config)],
+  [DRIVER_TYPES.GOOGLE_DRIVE, (config) => new GoogleDriveDriver(config)],
+  [DRIVER_TYPES.GITHUB_API, (config) => new GithubApiDriver(config)],
 ]);
 
 const driverCache = new Map();
@@ -67,4 +77,3 @@ export function resolveDriverByConfigId(configId) {
   driverCache.set(cacheKey, driver);
   return driver;
 }
-

@@ -23,11 +23,13 @@ async function createPasteTables(db) {
         id TEXT PRIMARY KEY,
         slug TEXT UNIQUE NOT NULL,
         content TEXT NOT NULL,
+        title TEXT,
         remark TEXT,
         password TEXT,
         expires_at DATETIME,
         max_views INTEGER,
         views INTEGER DEFAULT 0,
+        is_public BOOLEAN NOT NULL DEFAULT 1,
         created_by TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -50,6 +52,9 @@ async function createPasteTables(db) {
     `
     )
     .run();
+
+  // 为可见性添加索引（如果不存在）
+  await db.prepare(`CREATE INDEX IF NOT EXISTS idx_pastes_is_public ON ${DbTables.PASTES}(is_public)`).run();
 }
 
 /**
@@ -129,6 +134,7 @@ async function createStorageTables(db) {
         is_public INTEGER NOT NULL DEFAULT 0,
         is_default INTEGER NOT NULL DEFAULT 0,
         remark TEXT,
+        url_proxy TEXT,
         status TEXT NOT NULL DEFAULT 'ENABLED',
         config_json TEXT NOT NULL,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -250,6 +256,44 @@ async function createFileTables(db) {
 }
 
 /**
+ * 创建 FS 目录 Meta 相关表
+ * @param {D1Database} db - D1数据库实例
+ */
+async function createFsMetaTables(db) {
+  console.log("创建 FS 目录 Meta 表...");
+
+  await db
+    .prepare(
+      `
+      CREATE TABLE IF NOT EXISTS ${DbTables.FS_META} (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        path TEXT NOT NULL,
+
+        header_markdown TEXT NULL,
+        header_inherit BOOLEAN NOT NULL DEFAULT 0,
+
+        footer_markdown TEXT NULL,
+        footer_inherit BOOLEAN NOT NULL DEFAULT 0,
+
+        hide_patterns TEXT NULL,
+        hide_inherit BOOLEAN NOT NULL DEFAULT 0,
+
+        password TEXT NULL,
+        password_inherit BOOLEAN NOT NULL DEFAULT 0,
+
+        extra JSON NULL,
+
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )
+    `
+    )
+    .run();
+
+  await db.prepare(`CREATE INDEX IF NOT EXISTS idx_fs_meta_path ON ${DbTables.FS_META}(path)`).run();
+}
+
+/**
  * 创建系统设置表
  * @param {D1Database} db - D1数据库实例
  */
@@ -277,6 +321,235 @@ async function createSystemTables(db) {
     .run();
 }
 
+/**
+ * 创建任务编排相关表
+ * @param {D1Database} db - D1数据库实例
+ */
+async function createTasksTables(db) {
+  console.log("创建任务编排相关表...");
+
+  // 创建 tasks 表 - 通用任务编排表（支持 Workers + Docker）
+  await db
+    .prepare(
+      `
+      CREATE TABLE IF NOT EXISTS ${DbTables.TASKS} (
+        -- 核心标识
+        task_id TEXT PRIMARY KEY,
+        task_type TEXT NOT NULL,
+        status TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        stats TEXT NOT NULL DEFAULT '{}',
+        error_message TEXT,
+        user_id TEXT NOT NULL,
+        user_type TEXT NOT NULL,
+        workflow_instance_id TEXT,
+        created_at INTEGER NOT NULL,
+        started_at INTEGER,
+        updated_at INTEGER NOT NULL,
+        finished_at INTEGER
+      )
+    `,
+    )
+    .run();
+
+  await db
+    .prepare(
+      `CREATE INDEX IF NOT EXISTS idx_tasks_status_created ON ${DbTables.TASKS}(status, created_at DESC)`,
+    )
+    .run();
+  await db
+    .prepare(
+      `CREATE INDEX IF NOT EXISTS idx_tasks_type_status ON ${DbTables.TASKS}(task_type, status)`,
+    )
+    .run();
+  await db
+    .prepare(
+      `CREATE INDEX IF NOT EXISTS idx_tasks_user ON ${DbTables.TASKS}(user_id, created_at DESC)`,
+    )
+    .run();
+  await db
+    .prepare(
+      `CREATE INDEX IF NOT EXISTS idx_tasks_workflow ON ${DbTables.TASKS}(workflow_instance_id) WHERE workflow_instance_id IS NOT NULL`,
+    )
+    .run();
+
+  console.log("任务编排表创建完成");
+}
+
+/**
+ * 创建后台调度作业表（scheduled_jobs）
+ * @param {D1Database} db - D1数据库实例
+ */
+async function createScheduledJobsTables(db) {
+  console.log("创建后台调度作业表 scheduled_jobs...");
+
+  await db
+    .prepare(
+      `
+      CREATE TABLE IF NOT EXISTS ${DbTables.SCHEDULED_JOBS} (
+        task_id              TEXT PRIMARY KEY,
+        handler_id           TEXT,
+        name                 TEXT,
+        description          TEXT,
+        enabled              INTEGER NOT NULL,
+        schedule_type        TEXT NOT NULL DEFAULT 'interval',
+        interval_sec         INTEGER,
+        cron_expression      TEXT,
+        run_count            INTEGER NOT NULL DEFAULT 0,
+        failure_count        INTEGER NOT NULL DEFAULT 0,
+        last_run_status      TEXT,
+        last_run_started_at  DATETIME,
+        last_run_finished_at DATETIME,
+        next_run_after       DATETIME,
+        lock_until           DATETIME,
+        config_json          TEXT NOT NULL DEFAULT '{}',
+        created_at           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )
+    `,
+    )
+    .run();
+
+  await db
+    .prepare(
+      `CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_next_run ON ${DbTables.SCHEDULED_JOBS}(enabled, next_run_after)`,
+    )
+    .run();
+
+  console.log("scheduled_jobs 表检查/创建完成");
+}
+
+/**
+ * 创建后台调度作业运行日志表（scheduled_job_runs）
+ * @param {D1Database} db - D1数据库实例
+ */
+async function createScheduledJobRunsTables(db) {
+  console.log("创建后台调度作业运行日志表 scheduled_job_runs...");
+
+  await db
+    .prepare(
+      `
+      CREATE TABLE IF NOT EXISTS ${DbTables.SCHEDULED_JOB_RUNS} (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id       TEXT NOT NULL,
+        status        TEXT NOT NULL,
+        trigger_type  TEXT,
+        scheduled_at  DATETIME,
+        started_at    DATETIME NOT NULL,
+        finished_at   DATETIME,
+        duration_ms   INTEGER,
+        summary       TEXT,
+        error_message TEXT,
+        details_json  TEXT,
+        created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )
+    `,
+    )
+    .run();
+
+  await db
+    .prepare(
+      `CREATE INDEX IF NOT EXISTS idx_scheduled_job_runs_task_started ON ${DbTables.SCHEDULED_JOB_RUNS}(task_id, started_at DESC)`,
+    )
+    .run();
+
+  console.log("scheduled_job_runs 表检查/创建完成");
+}
+
+/**
+ * 创建通用上传会话相关表（跨驱动前端分片/断点续传会话管理）
+ * @param {D1Database} db - D1数据库实例
+ */
+async function createUploadSessionsTables(db) {
+  console.log("创建上传会话相关表...");
+
+  // 通用上传会话表：管理各存储驱动的前端分片/断点续传会话（S3 / OneDrive / 其他）
+  await db
+    .prepare(
+      `
+      CREATE TABLE IF NOT EXISTS ${DbTables.UPLOAD_SESSIONS} (
+        id TEXT PRIMARY KEY,
+
+        -- 主体与目标信息
+        user_id TEXT NOT NULL,
+        user_type TEXT NOT NULL,
+        storage_type TEXT NOT NULL,
+        storage_config_id TEXT NOT NULL,
+        mount_id TEXT,
+        fs_path TEXT NOT NULL,
+        source TEXT NOT NULL,
+
+        -- 文件级元数据
+        file_name TEXT NOT NULL,
+        file_size INTEGER NOT NULL,
+        mime_type TEXT,
+        checksum TEXT,
+
+        -- 文件指纹（用于跨驱动/跨会话识别同一逻辑文件）
+        fingerprint_algo TEXT,
+        fingerprint_value TEXT,
+
+        -- 策略与进度
+        strategy TEXT NOT NULL,
+        part_size INTEGER NOT NULL,
+        total_parts INTEGER NOT NULL,
+        bytes_uploaded INTEGER NOT NULL DEFAULT 0,
+        uploaded_parts INTEGER NOT NULL DEFAULT 0,
+        next_expected_range TEXT,
+
+        -- provider 会话信息（驱动私有）
+        provider_upload_id TEXT,
+        provider_upload_url TEXT,
+        provider_meta TEXT,
+
+        -- 会话状态与错误
+        status TEXT NOT NULL,
+        error_code TEXT,
+        error_message TEXT,
+
+        -- 生命周期
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        expires_at DATETIME
+      )
+    `,
+    )
+    .run();
+
+  await db
+    .prepare(
+      `CREATE INDEX IF NOT EXISTS idx_upload_sessions_user ON ${DbTables.UPLOAD_SESSIONS}(user_id, user_type)`,
+    )
+    .run();
+  await db
+    .prepare(
+      `CREATE INDEX IF NOT EXISTS idx_upload_sessions_storage ON ${DbTables.UPLOAD_SESSIONS}(storage_type, storage_config_id)`,
+    )
+    .run();
+  await db
+    .prepare(
+      `CREATE INDEX IF NOT EXISTS idx_upload_sessions_mount_path ON ${DbTables.UPLOAD_SESSIONS}(mount_id, fs_path)`,
+    )
+    .run();
+  await db
+    .prepare(
+      `CREATE INDEX IF NOT EXISTS idx_upload_sessions_status ON ${DbTables.UPLOAD_SESSIONS}(status, updated_at DESC)`,
+    )
+    .run();
+  await db
+    .prepare(
+      `CREATE INDEX IF NOT EXISTS idx_upload_sessions_source ON ${DbTables.UPLOAD_SESSIONS}(source)`,
+    )
+    .run();
+  await db
+    .prepare(
+      `CREATE INDEX IF NOT EXISTS idx_upload_sessions_fingerprint ON ${DbTables.UPLOAD_SESSIONS}(fingerprint_value)`,
+    )
+    .run();
+
+  console.log("上传会话表创建完成");
+}
+
 // ==================== 索引创建 ====================
 
 /**
@@ -285,6 +558,11 @@ async function createSystemTables(db) {
  */
 async function createIndexes(db) {
   console.log("创建数据库索引...");
+
+  // scheduled_jobs 表索引（幂等）
+  await db.prepare(`CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_next_run ON ${DbTables.SCHEDULED_JOBS}(enabled, next_run_after)`).run();
+  // scheduled_job_runs 表索引（幂等）
+  await db.prepare(`CREATE INDEX IF NOT EXISTS idx_scheduled_job_runs_task_started ON ${DbTables.SCHEDULED_JOB_RUNS}(task_id, started_at DESC)`).run();
 
   // pastes表索引
   await db.prepare(`CREATE INDEX IF NOT EXISTS idx_pastes_slug ON ${DbTables.PASTES}(slug)`).run();
@@ -322,6 +600,33 @@ async function createIndexes(db) {
 async function initDefaultSettings(db) {
   console.log("初始化系统默认设置...");
 
+  // 为 cleanup_upload_sessions 任务写入默认调度配置（若不存在）
+  const cleanupIntervalSec = 24 * 60 * 60; // 每 24 小时运行一次（秒）
+  const firstCleanupNextRunIso = new Date(
+    Date.now() + cleanupIntervalSec * 1000,
+  ).toISOString();
+  await db
+    .prepare(
+      `
+      INSERT INTO ${DbTables.SCHEDULED_JOBS} (task_id, handler_id, name, description, enabled, schedule_type, interval_sec, next_run_after, config_json)
+      SELECT ?, ?, ?, ?, 1, 'interval', ?, ?, ?
+      WHERE NOT EXISTS (
+        SELECT 1 FROM ${DbTables.SCHEDULED_JOBS} WHERE task_id = ?
+      )
+    `,
+    )
+    .bind(
+      "cleanup_upload_sessions",
+      "cleanup_upload_sessions",
+      "清理分片上传会话（默认）",
+      "定期清理本地分片上传会话记录，保持活跃列表干净。",
+      cleanupIntervalSec,
+      firstCleanupNextRunIso,
+      JSON.stringify({ keepDays: 30, activeGraceHours: 24 }),
+      "cleanup_upload_sessions",
+    )
+    .run();
+
   const defaultSettings = [
     {
       key: "max_upload_size",
@@ -334,13 +639,13 @@ async function initDefaultSettings(db) {
     },
     {
       key: "webdav_upload_mode",
-      value: "direct",
-      description: "WebDAV客户端的上传模式选择。",
+      value: "chunked",
+      description: "WebDAV 客户端上传模式。流式上传大文件，单次上传适合小文件或兼容性场景。",
       type: "select",
       group_id: 3,
       options: JSON.stringify([
-        { value: "direct", label: "直接上传" },
-        { value: "multipart", label: "分片上传" },
+        { value: "chunked", label: "流式上传" },
+        { value: "single", label: "单次上传" },
       ]),
       sort_order: 1,
       flags: 0,
@@ -451,10 +756,15 @@ export async function initDatabase(db) {
   await createAdminTables(db);
   await createStorageTables(db);
   await createFileTables(db);
+  await createFsMetaTables(db);
   await createSystemTables(db);
+  await createTasksTables(db);
+  await createScheduledJobsTables(db);
+  await createScheduledJobRunsTables(db);
+  await createUploadSessionsTables(db);
 
   // 创建索引
-  await createIndexes(db);
+  await createIndexes(db)
 
   // 初始化完整的默认设置
   await initDefaultSettings(db); // 基础设置 (4个)
@@ -725,6 +1035,66 @@ async function executeMigrationForVersion(db, version) {
       console.log("版本20：默认游客 API 密钥检查/创建完成。");
       break;
 
+    case 21:
+      // 版本21：为 pastes 表添加 title 和 is_public 字段，并补充索引；同时创建 fs_meta 表
+      console.log("版本21：为 pastes 表添加 title 和 is_public 字段...");
+      await addTableField(db, DbTables.PASTES, "title", "title TEXT");
+      await addTableField(db, DbTables.PASTES, "is_public", "is_public BOOLEAN NOT NULL DEFAULT 1");
+      await db.prepare(`CREATE INDEX IF NOT EXISTS idx_pastes_is_public ON ${DbTables.PASTES}(is_public)`).run();
+      console.log("版本21：pastes 表 title / is_public 字段与索引检查/创建完成。");
+
+      console.log("版本21：检查并创建 fs_meta 目录 Meta 表...");
+      await createFsMetaTables(db);
+      console.log("版本21：fs_meta 表及其索引检查/创建完成。");
+      break;
+
+    case 22:
+      // 版本22：将 WebDAV 上传模式设置迁移为 single/chunked
+      console.log("版本22：迁移 webdav_upload_mode 设置到 single/chunked...");
+      await migrateWebDavUploadModeToSingleChunked(db);
+      break;
+
+    case 23:
+      // 版本23：
+      // 1）为已有数据库补充 preview_document_apps 文档/Office 预览模板配置
+      // 2）统一 WebDAV 上传模式 webdav_upload_mode 的显示文案（流式上传/单次上传）
+      console.log("版本23：检查并补充 preview_document_apps 预览模板配置...");
+      await addPreviewSettings(db);
+      console.log("版本23：preview_document_apps 配置检查/创建完成。");
+      console.log("版本23：更新 webdav_upload_mode 显示选项为“流式上传/单次上传”...");
+      await normalizeWebDavUploadModeLabels(db);
+      console.log("版本23：webdav_upload_mode 选项更新完成。");
+      break;
+
+    case 24:
+      // 版本24：为 storage_configs 表添加 url_proxy 字段（代理入口 URL）
+      console.log("版本24：为 storage_configs 表添加 url_proxy 字段...");
+      await addTableField(db, DbTables.STORAGE_CONFIGS, "url_proxy", "url_proxy TEXT");
+      console.log("版本24：storage_configs.url_proxy 字段检查/创建完成。");
+      break;
+
+    case 25:
+      // 版本25：创建通用 tasks 表用于跨运行时任务编排（Workers + Docker）
+      console.log("版本25：检查并创建 tasks 表...");
+      await createTasksTables(db);
+      console.log("版本25：tasks 表及索引创建完成。");
+      break;
+
+    case 26:
+      // 版本26：创建通用 upload_sessions 表用于跨驱动前端分片/断点续传会话管理
+      console.log("版本26：检查并创建 upload_sessions 表...");
+      await createUploadSessionsTables(db);
+      console.log("版本26：upload_sessions 表及索引检查/创建完成。");
+      break;
+
+    case 27:
+      // 版本27：创建 scheduled_jobs 表用于后台调度作业（初始版本）
+      console.log("版本27：检查并创建 scheduled_jobs，scheduled_job_runs 表...");
+      await createScheduledJobsTables(db);
+      await createScheduledJobRunsTables(db);
+      console.log("版本27：scheduled_jobs，scheduled_job_runs 表及索引检查/创建完成。");
+      break;
+    
     default:
       console.log(`未知的迁移版本: ${version}`);
       break;
@@ -998,6 +1368,58 @@ async function migrateToBitFlagPermissions(db) {
 }
 
 /**
+ * 将 WebDAV 上传模式设置迁移为 single/chunked
+ * 兼容旧值：
+ *  - direct/stream -> single
+ *  - multipart     -> chunked
+ *  - 其它值        -> 保持不变
+ * @param {D1Database} db - D1数据库实例
+ */
+async function migrateWebDavUploadModeToSingleChunked(db) {
+  console.log("开始迁移 webdav_upload_mode 设置到 single/chunked...");
+
+  try {
+    const row = await db
+      .prepare(`SELECT key, value, options FROM ${DbTables.SYSTEM_SETTINGS} WHERE key = ?`)
+      .bind("webdav_upload_mode")
+      .first();
+
+    if (!row) {
+      console.log("未找到 webdav_upload_mode 设置，跳过迁移");
+      return;
+    }
+
+    let value = row.value;
+    if (value === "direct" || value === "stream") {
+      value = "single";
+    } else if (value === "multipart") {
+      value = "chunked";
+    }
+
+    // 统一使用新的显示标签：流式上传 / 单次上传
+    const options = JSON.stringify([
+      { value: "chunked", label: "流式上传" },
+      { value: "single", label: "单次上传" },
+    ]);
+
+    const now = new Date().toISOString();
+
+    await db
+      .prepare(
+        `UPDATE ${DbTables.SYSTEM_SETTINGS}
+         SET value = ?, options = ?, updated_at = ?
+         WHERE key = 'webdav_upload_mode'`
+      )
+      .bind(value, options, now)
+      .run();
+
+    console.log("webdav_upload_mode 设置迁移完成:", value);
+  } catch (error) {
+    console.error("迁移 webdav_upload_mode 设置失败:", error);
+  }
+}
+
+/**
  * 将已有的 api_keys.is_guest 列迁移为 is_enable（启用位）
  * 兼容以下情况：
  *  - 只有 is_guest：尝试重命名为 is_enable，失败则新增 is_enable 并复制数据；
@@ -1160,6 +1582,30 @@ async function addPreviewSettings(db) {
       sort_order: 6,
       flags: 0,
     },
+    {
+      key: "preview_document_apps",
+      value:
+        JSON.stringify(
+          {
+            "doc,docx,xls,xlsx,ppt,pptx,rtf": {
+              microsoft: {
+                urlTemplate: "https://view.officeapps.live.com/op/view.aspx?src=$e_url",
+              },
+              google: {
+                urlTemplate: "https://docs.google.com/viewer?url=$e_url&embedded=true",
+              },
+            },
+          },
+          null,
+          2,
+        ),
+      description:
+        "文档/Office 预览使用的 DocumentApp 模板配置，JSON 结构：按扩展名映射到各个预览服务的 URL 模板",
+      type: "textarea",
+      group_id: 2,
+      sort_order: 7,
+      flags: 0,
+    },
   ];
 
   for (const setting of previewSettings) {
@@ -1173,6 +1619,47 @@ async function addPreviewSettings(db) {
         .bind(setting.key, setting.value, setting.description, setting.type, setting.group_id, setting.sort_order, setting.flags)
         .run();
     }
+  }
+}
+
+/**
+ * 统一 webdav_upload_mode 设置的显示选项为“流式上传 / 单次上传”
+ * 保留原有 value（single/chunked），仅更新 options 和 description
+ * @param {D1Database} db
+ */
+async function normalizeWebDavUploadModeLabels(db) {
+  try {
+    const row = await db
+      .prepare(`SELECT key, value FROM ${DbTables.SYSTEM_SETTINGS} WHERE key = ?`)
+      .bind("webdav_upload_mode")
+      .first();
+
+    if (!row) {
+      console.log("normalizeWebDavUploadModeLabels: 未找到 webdav_upload_mode 设置，跳过更新");
+      return;
+    }
+
+    const options = JSON.stringify([
+      { value: "chunked", label: "流式上传" },
+      { value: "single", label: "单次上传" },
+    ]);
+
+    const description ="WebDAV 客户端上传模式。流式上传大文件，单次上传适合小文件或兼容性场景。";
+
+    const now = new Date().toISOString();
+
+    await db
+      .prepare(
+        `UPDATE ${DbTables.SYSTEM_SETTINGS}
+         SET description = ?, options = ?, updated_at = ?
+         WHERE key = 'webdav_upload_mode'`,
+      )
+      .bind(description, options, now)
+      .run();
+
+    console.log("normalizeWebDavUploadModeLabels: 已更新 webdav_upload_mode 显示配置");
+  } catch (error) {
+    console.error("normalizeWebDavUploadModeLabels: 更新 webdav_upload_mode 显示配置失败:", error);
   }
 }
 
@@ -1411,6 +1898,9 @@ export async function checkAndInitDatabase(db) {
       DbTables.FILE_PASSWORDS,
       DbTables.SYSTEM_SETTINGS,
       DbTables.STORAGE_MOUNTS,
+      DbTables.TASKS,
+      DbTables.SCHEDULED_JOBS,
+      DbTables.SCHEDULED_JOB_RUNS,
     ];
 
     for (const tableName of requiredTables) {
@@ -1431,14 +1921,15 @@ export async function checkAndInitDatabase(db) {
     const versionSetting = await db.prepare(`SELECT value FROM ${DbTables.SYSTEM_SETTINGS} WHERE key = 'schema_version'`).first();
 
     const currentVersion = versionSetting ? parseInt(versionSetting.value) : 0;
-    const targetVersion = 20; // 当前最新版本
+    const targetVersion = 27; // 当前最新版本
 
     if (currentVersion < targetVersion) {
       console.log(`需要更新数据库结构，当前版本:${currentVersion}，目标版本:${targetVersion}`);
 
       if (currentVersion === 0 && !needsTablesCreation) {
-        // 如果版本为0但表已存在，表示是旧数据库，执行完整初始化确保所有表创建
-        await initDatabase(db);
+        // 如果版本为0且所有必需表都已存在，表示是旧数据库
+        // 为保留已有数据，此处应执行迁移脚本而不是完整初始化
+        await migrateDatabase(db, 0, targetVersion);
       } else if (currentVersion > 0) {
         // 执行迁移脚本
         await migrateDatabase(db, currentVersion, targetVersion);
