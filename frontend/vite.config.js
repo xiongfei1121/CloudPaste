@@ -12,18 +12,20 @@ export default defineConfig(({ command, mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
 
   // 统一版本管理
-  const APP_VERSION = "1.6.0";
+  const APP_VERSION = "1.9.1";
   const isDev = command === "serve";
   const enablePwa = command === "build";
 
-  // 打印环境变量，帮助调试
-  console.log("Vite环境变量:", {
-    VITE_BACKEND_URL: env.VITE_BACKEND_URL || "未设置",
-    VITE_APP_ENV: env.VITE_APP_ENV || "未设置",
-    APP_VERSION: APP_VERSION,
-    MODE: mode,
-    COMMAND: command,
-  });
+  // 打印构建信息（仅在显式开启时）
+  if (env.VITE_PRINT_BUILD_INFO === "1" || env.VITE_PRINT_BUILD_INFO === "true") {
+    console.log("Vite构建信息:", {
+      VITE_BACKEND_URL: env.VITE_BACKEND_URL || "未设置",
+      VITE_APP_ENV: env.VITE_APP_ENV || "未设置",
+      APP_VERSION: APP_VERSION,
+      MODE: mode,
+      COMMAND: command,
+    });
+  }
 
   const foliatePdfStubPath = fileURLToPath(new URL("./src/vendor/foliate-js/pdf.js", import.meta.url));
 
@@ -170,24 +172,12 @@ export default defineConfig(({ command, mode }) => {
               },
             },
 
-            // 用户媒体文件 - NetworkFirst（大文件适度缓存）
+            // 用户媒体文件 - NetworkOnly
             {
               urlPattern: ({ request, url }) =>
                 (request.destination === "video" || request.destination === "audio" || /\.(mp4|webm|ogg|mp3|wav|flac|aac)$/i.test(url.pathname)) &&
                 (url.pathname.includes("/api/") || url.searchParams.has("X-Amz-Algorithm") || url.hostname !== self.location.hostname),
-              handler: "NetworkFirst",
-              options: {
-                cacheName: "user-media",
-                expiration: {
-                  maxEntries: 30,
-                  maxAgeSeconds: 2 * 60 * 60, // 2小时（媒体文件较大，适度缓存）
-                },
-                networkTimeoutSeconds: 15,
-                cacheableResponse: {
-                  statuses: [0, 200, 206], // 支持范围请求
-                },
-                rangeRequests: true,
-              },
+              handler: "NetworkOnly",
             },
 
             // 用户文档文件 - NetworkFirst（文档快速更新）
@@ -457,7 +447,7 @@ export default defineConfig(({ command, mode }) => {
       minify: "terser",
       terserOptions: {
         compress: {
-          drop_console: true,
+          pure_funcs: ["console.log"],
         },
       },
       chunkSizeWarningLimit: 1000,

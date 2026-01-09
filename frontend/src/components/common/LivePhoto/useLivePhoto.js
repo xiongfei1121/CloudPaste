@@ -6,6 +6,8 @@
  */
 
 import { ref, reactive, computed, onMounted, onBeforeUnmount, watch, unref } from "vue";
+import { useEventListener, useIntersectionObserver } from "@vueuse/core";
+import { createLogger } from "@/utils/logger.js";
 
 /**
  * 错误类型定义
@@ -63,6 +65,7 @@ const isMobile = () => {
  * @param {Function} [options.onCanPlay] - 可播放回调
  */
 export function useLivePhoto(options = {}) {
+  const log = createLogger("LivePhoto");
   const readSources = () => ({
     photoSrc: unref(options.photoSrc) || "",
     videoSrc: unref(options.videoSrc) || "",
@@ -103,7 +106,7 @@ export function useLivePhoto(options = {}) {
   // 内部状态
   let touchStartTime = 0;
   let isWithin = false; // 用于处理触摸中断
-  let intersectionObserver = null;
+  let stopIntersectionObserver = null;
   let previewTimeoutId = null;
   let isLazyLoadSetup = false;
 
@@ -130,7 +133,7 @@ export function useLivePhoto(options = {}) {
       state.isWarmed = true;
     } catch (e) {
       // 预热失败不影响后续操作
-      console.warn("[LivePhoto] Video warm-up failed:", e.message);
+      log.warn("[LivePhoto] Video warm-up failed:", e.message);
     }
   };
 
@@ -140,7 +143,8 @@ export function useLivePhoto(options = {}) {
   const setupLazyLoad = () => {
     if (!config.lazyLoad || !containerRef.value || isLazyLoadSetup) return;
 
-    intersectionObserver = new IntersectionObserver(
+    const { stop } = useIntersectionObserver(
+      containerRef,
       (entries) => {
         entries.forEach((entry) => {
           state.isVisible = entry.isIntersecting;
@@ -153,8 +157,7 @@ export function useLivePhoto(options = {}) {
       },
       { rootMargin: "100px" }
     );
-
-    intersectionObserver.observe(containerRef.value);
+    stopIntersectionObserver = stop;
     isLazyLoadSetup = true;
   };
 
@@ -380,31 +383,39 @@ export function useLivePhoto(options = {}) {
 
   const handleProgressEvent = () => updateProgress();
 
+  /** @type {Array<Function>} */
+  let stopVideoEventListeners = [];
+
   const setupVideoEvents = () => {
     const video = videoRef.value;
     if (!video) return;
 
-    video.addEventListener("progress", handleProgressEvent);
-    video.addEventListener("loadedmetadata", handleLoadedMetadata);
-    video.addEventListener("canplaythrough", handleCanPlayThrough);
-    video.addEventListener("ended", handleEnded);
-    video.addEventListener("error", handleError);
-    video.addEventListener("timeupdate", handleTimeUpdate);
+    cleanupVideoEvents();
+
+    stopVideoEventListeners = [
+      useEventListener(video, "progress", handleProgressEvent),
+      useEventListener(video, "loadedmetadata", handleLoadedMetadata),
+      useEventListener(video, "canplaythrough", handleCanPlayThrough),
+      useEventListener(video, "ended", handleEnded),
+      useEventListener(video, "error", handleError),
+      useEventListener(video, "timeupdate", handleTimeUpdate),
+    ];
   };
 
   /**
    * 清理视频事件
    */
   const cleanupVideoEvents = () => {
-    const video = videoRef.value;
-    if (!video) return;
-
-    video.removeEventListener("progress", handleProgressEvent);
-    video.removeEventListener("loadedmetadata", handleLoadedMetadata);
-    video.removeEventListener("canplaythrough", handleCanPlayThrough);
-    video.removeEventListener("ended", handleEnded);
-    video.removeEventListener("error", handleError);
-    video.removeEventListener("timeupdate", handleTimeUpdate);
+    if (Array.isArray(stopVideoEventListeners) && stopVideoEventListeners.length > 0) {
+      stopVideoEventListeners.forEach((stop) => {
+        try {
+          stop?.();
+        } catch {
+          // ignore
+        }
+      });
+    }
+    stopVideoEventListeners = [];
   };
 
   /**
@@ -412,7 +423,8 @@ export function useLivePhoto(options = {}) {
    */
   const destroy = () => {
     // 清理观察器
-    intersectionObserver?.disconnect();
+    stopIntersectionObserver?.();
+    stopIntersectionObserver = null;
 
     // 清理定时器
     clearTimeout(previewTimeoutId);
@@ -496,12 +508,14 @@ export function useLivePhoto(options = {}) {
     // 首次用户交互时预热视频
     const warmOnInteraction = () => {
       warmVideo();
-      containerRef.value?.removeEventListener("touchstart", warmOnInteraction);
-      containerRef.value?.removeEventListener("mouseenter", warmOnInteraction);
+      stopWarmTouch?.();
+      stopWarmMouse?.();
+      stopWarmTouch = null;
+      stopWarmMouse = null;
     };
 
-    containerRef.value?.addEventListener("touchstart", warmOnInteraction, { once: true, passive: true });
-    containerRef.value?.addEventListener("mouseenter", warmOnInteraction, { once: true });
+    let stopWarmTouch = useEventListener(containerRef, "touchstart", warmOnInteraction, { once: true, passive: true });
+    let stopWarmMouse = useEventListener(containerRef, "mouseenter", warmOnInteraction, { once: true });
   });
 
   onBeforeUnmount(() => {

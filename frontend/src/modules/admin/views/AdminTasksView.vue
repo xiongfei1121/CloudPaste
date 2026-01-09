@@ -53,6 +53,14 @@
               <!-- Batch Actions (shown when items selected) -->
               <template v-if="selectedTasks.length > 0">
                 <button
+                  v-if="selectedCancellableTaskIds.length > 0"
+                  @click="handleBatchCancel"
+                  class="flex items-center gap-1.5 px-2 py-1 sm:px-3 sm:py-1.5 rounded-md text-sm font-medium transition-colors bg-yellow-50 dark:bg-yellow-900/20 text-yellow-700 dark:text-yellow-300 hover:bg-yellow-100 dark:hover:bg-yellow-900/40 border border-yellow-200 dark:border-yellow-800"
+                >
+                  <XCircleIcon class="w-4 h-4" />
+                  <span class="hidden sm:inline">{{ t('admin.tasks.actions.cancel') }} ({{ selectedCancellableTaskIds.length }})</span>
+                </button>
+                <button
                   @click="handleBatchDelete"
                   class="flex items-center gap-1.5 px-2 py-1 sm:px-3 sm:py-1.5 rounded-md text-sm font-medium transition-colors bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 hover:bg-red-100 dark:hover:bg-red-900/40 border border-red-200 dark:border-red-800"
                 >
@@ -230,16 +238,25 @@
                       class="p-1.5 rounded-full transition-colors text-blue-500 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20"
                       :title="t('admin.tasks.actions.viewDetails')"
                     >
-                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-                      </svg>
-                    </button>
-                    <!-- Delete Button -->
-                    <button
-                      @click.stop="handleDeleteTask(task)"
-                      class="p-1.5 rounded-full transition-colors text-red-400 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20"
-                      :title="t('admin.tasks.actions.deleteTask')"
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                  </svg>
+                </button>
+                <!-- Cancel Button -->
+                <button
+                  v-if="isTaskCancellable(task)"
+                  @click.stop="handleCancelTask(task)"
+                  class="p-1.5 rounded-full transition-colors text-yellow-600 dark:text-yellow-400 hover:bg-yellow-50 dark:hover:bg-yellow-900/20"
+                  :title="t('admin.tasks.actions.cancel')"
+                >
+                  <XCircleIcon class="w-4 h-4" />
+                </button>
+                <!-- Delete Button -->
+                <button
+                  @click.stop="handleDeleteTask(task)"
+                  class="p-1.5 rounded-full transition-colors text-red-400 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20"
+                  :title="t('admin.tasks.actions.deleteTask')"
                     >
                       <TrashIcon class="w-4 h-4" />
                     </button>
@@ -280,8 +297,10 @@
 
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted, h } from 'vue'
+import { useIntervalFn } from '@vueuse/core'
 import { useI18n } from 'vue-i18n'
-import { listJobs, getJobStatus, deleteJob, batchCopyItems, listJobTypes } from '@/api/services/fsService'
+import { createLogger } from '@/utils/logger.js'
+import { listJobs, getJobStatus, cancelJob, deleteJob, batchCopyItems, listJobTypes } from '@/api/services/fsService'
 import { useThemeMode } from '@/composables/core/useThemeMode.js'
 import { useConfirmDialog } from '@/composables/core/useConfirmDialog.js'
 import { useCreatorBadge } from '@/composables/admin-management/useCreatorBadge.js'
@@ -297,7 +316,8 @@ import {
   IconSync as SyncIcon,
   IconCopy as CopyIcon,
   IconRefresh as RefreshIcon,
-  IconTrash as TrashIcon
+  IconTrash as TrashIcon,
+  IconXCircle as XCircleIcon
 } from '@/components/icons'
 import StatsCard from '@/modules/admin/components/StatsCard.vue'
 import StatusBadge from '@/modules/admin/components/StatusBadge.vue'
@@ -311,6 +331,7 @@ import { useAdminBase } from '@/composables/admin-management/useAdminBase.js'
 // Composables
 const { isDarkMode: darkMode } = useThemeMode()
 const { t, locale } = useI18n()
+const log = createLogger('AdminTasksView')
 const { dialogState, confirm, handleConfirm, handleCancel } = useConfirmDialog()
 const { getCreatorBadgeInfo } = useCreatorBadge()
 
@@ -328,7 +349,33 @@ const filters = ref({
 const selectedTaskId = ref(null)
 const selectedTasks = ref([])
 const { pagination, pageSizeOptions, changePageSize } = useAdminBase('tasks')
-let pollInterval = null
+const { pause: pausePoll, resume: resumePoll } = useIntervalFn(
+  () => {
+    if (tasks.value.some(t => t.status === 'running' || t.status === 'pending')) {
+      pollRunningTasks()
+    }
+  },
+  3000,
+  { immediate: false }
+)
+
+const isTaskCancellable = (task) => {
+  if (!task) return false
+  if (task.allowedActions && typeof task.allowedActions === 'object') {
+    return task.allowedActions.canCancel === true
+  }
+  return task.status === 'pending' || task.status === 'running'
+}
+
+const selectedCancellableTaskIds = computed(() => {
+  const selected = selectedTasks.value || []
+  if (selected.length === 0) return []
+  const byId = new Map(tasks.value.map(t => [t.jobId, t]))
+  return selected
+    .map(id => byId.get(id))
+    .filter(t => isTaskCancellable(t))
+    .map(t => t.jobId)
+})
 
 // Computed - 动态生成筛选选项
 const availableTaskTypes = computed(() => {
@@ -541,7 +588,7 @@ const taskColumns = computed(() => [
     key: 'actions',
     header: t('admin.tasks.table.actions'),
     render: (task) => {
-      return h('div', { class: 'flex items-center justify-center gap-1' }, [
+      const actions = [
         // View Details Button
         h('button', {
           class: 'p-1.5 rounded transition text-blue-500 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20',
@@ -571,6 +618,24 @@ const taskColumns = computed(() => [
             })
           ])
         ]),
+      ]
+
+      if (isTaskCancellable(task)) {
+        actions.push(
+          h('button', {
+            class: 'p-1.5 rounded transition text-yellow-600 dark:text-yellow-400 hover:bg-yellow-50 dark:hover:bg-yellow-900/20 hover:text-yellow-700 dark:hover:text-yellow-300',
+            title: t('admin.tasks.actions.cancel'),
+            onClick: (e) => {
+              e.stopPropagation()
+              handleCancelTask(task)
+            }
+          }, [
+            h(XCircleIcon, { class: 'w-5 h-5' })
+          ])
+        )
+      }
+
+      actions.push(
         // Delete Button
         h('button', {
           class: 'p-1.5 rounded transition text-red-400 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 hover:text-red-600 dark:hover:text-red-300',
@@ -582,7 +647,9 @@ const taskColumns = computed(() => [
         }, [
           h(TrashIcon, { class: 'w-5 h-5' })
         ])
-      ])
+      )
+
+      return h('div', { class: 'flex items-center justify-center gap-1' }, actions)
     }
   }
 ])
@@ -603,7 +670,7 @@ const fetchJobTypes = async () => {
     const types = response?.data?.types || response?.types || []
     jobTypes.value = Array.isArray(types) ? types : []
   } catch (error) {
-    console.error('[AdminTasksView] 获取任务类型失败:', error)
+    log.error('[AdminTasksView] 获取任务类型失败:', error)
   }
 }
 
@@ -656,7 +723,7 @@ const fetchTasks = async () => {
       pagination.hasMore = pagination.offset + pagination.limit < retryTotal
     }
   } catch (error) {
-    console.error('Failed to fetch tasks:', error)
+    log.error('Failed to fetch tasks:', error)
   } finally {
     loading.value = false
   }
@@ -753,7 +820,28 @@ const handleDeleteTask = async (task) => {
       await deleteJob(task.jobId)
       await fetchTasks()
     } catch (error) {
-      console.error('Failed to delete task:', error)
+      log.error('Failed to delete task:', error)
+    }
+  }
+}
+
+const handleCancelTask = async (task) => {
+  const confirmed = await confirm({
+    title: t('admin.tasks.confirmCancel.title'),
+    message: t('admin.tasks.confirmCancel.single', {
+      name: `${formatTaskType(task.taskType)} (${task.jobId})`
+    }),
+    confirmType: 'warning',
+    confirmText: t('admin.tasks.actions.cancel'),
+    darkMode: darkMode.value
+  })
+
+  if (confirmed) {
+    try {
+      await cancelJob(task.jobId)
+      await fetchTasks()
+    } catch (error) {
+      log.error('[AdminTasksView] 取消任务失败:', error)
     }
   }
 }
@@ -780,10 +868,42 @@ const handleBatchDelete = async () => {
       selectedTasks.value = failedIds
       await fetchTasks()
       if (failedIds.length > 0) {
-        console.error('[AdminTasksView] 部分任务删除失败:', failedIds)
+        log.error('[AdminTasksView] 部分任务删除失败:', failedIds)
       }
     } catch (error) {
-      console.error('Failed to batch delete tasks:', error)
+      log.error('Failed to batch delete tasks:', error)
+    }
+  }
+}
+
+const handleBatchCancel = async () => {
+  const targets = selectedCancellableTaskIds.value
+  if (!targets || targets.length === 0) return
+
+  const confirmed = await confirm({
+    title: t('admin.tasks.confirmCancel.title'),
+    message: t('admin.tasks.confirmCancel.batch', { count: targets.length }),
+    confirmType: 'warning',
+    confirmText: `${t('admin.tasks.actions.cancel')} (${targets.length})`,
+    darkMode: darkMode.value
+  })
+
+  if (confirmed) {
+    try {
+      const results = await Promise.allSettled(targets.map(jobId => cancelJob(jobId)))
+      const failedIds = []
+      results.forEach((result, index) => {
+        if (result.status === 'rejected') {
+          failedIds.push(targets[index])
+        }
+      })
+      selectedTasks.value = failedIds
+      await fetchTasks()
+      if (failedIds.length > 0) {
+        log.error('[AdminTasksView] 部分任务取消失败:', failedIds)
+      }
+    } catch (error) {
+      log.error('[AdminTasksView] 批量取消任务失败:', error)
     }
   }
 }
@@ -805,14 +925,14 @@ const handleRetryAllFailed = async ({ task, items }) => {
     const copyItems = normalizeCopyItems(failedItems)
 
     if (copyItems.length === 0) {
-      console.warn('[AdminTasksView] 没有可重试的失败项')
+      log.warn('[AdminTasksView] 没有可重试的失败项')
       return
     }
 
     await batchCopyItems(copyItems, task?.payload?.options || {})
     await fetchTasks()
   } catch (error) {
-    console.error('[AdminTasksView] 重试全部失败项失败:', error)
+    log.error('[AdminTasksView] 重试全部失败项失败:', error)
   }
 }
 
@@ -820,14 +940,14 @@ const handleRetryFile = async ({ task, item }) => {
   try {
     const copyItems = normalizeCopyItems([item])
     if (copyItems.length === 0) {
-      console.warn('[AdminTasksView] 失败项缺少路径，无法重试')
+      log.warn('[AdminTasksView] 失败项缺少路径，无法重试')
       return
     }
 
     await batchCopyItems(copyItems, task?.payload?.options || {})
     await fetchTasks()
   } catch (error) {
-    console.error('[AdminTasksView] 重试单个失败项失败:', error)
+    log.error('[AdminTasksView] 重试单个失败项失败:', error)
   }
 }
 
@@ -858,17 +978,11 @@ onMounted(() => {
   fetchJobTypes()
   fetchTasks()
   // 仅在存在运行中/待执行任务时轮询
-  pollInterval = setInterval(() => {
-    if (tasks.value.some(t => t.status === 'running' || t.status === 'pending')) {
-      pollRunningTasks()
-    }
-  }, 3000)
+  resumePoll()
 })
 
 onUnmounted(() => {
-  if (pollInterval) {
-    clearInterval(pollInterval)
-  }
+  pausePoll()
 })
 </script>
 

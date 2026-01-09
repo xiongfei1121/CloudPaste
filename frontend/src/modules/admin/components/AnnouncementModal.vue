@@ -74,10 +74,13 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, watch, nextTick } from "vue";
+import { ref, computed, onMounted, watch, nextTick } from "vue";
+import { onKeyStroke } from "@vueuse/core";
+import { useLocalStorage } from "@vueuse/core";
 import { useI18n } from "vue-i18n";
 import { loadVditor, VDITOR_ASSETS_BASE } from "@/utils/vditorLoader.js";
 import { IconCheck, IconClose, IconInformationCircle } from "@/components/icons";
+import { createLogger } from "@/utils/logger.js";
 
 const props = defineProps({
   content: {
@@ -88,6 +91,13 @@ const props = defineProps({
     type: Boolean,
     default: false,
   },
+  // 是否在页面加载后自动弹出
+  // - true: 自动弹出（旧行为）
+  // - false: 不自动弹出（由父组件手动触发 open()）
+  autoOpen: {
+    type: Boolean,
+    default: true,
+  },
   darkMode: {
     type: Boolean,
     default: false,
@@ -95,6 +105,7 @@ const props = defineProps({
 });
 
 const { t } = useI18n();
+const log = createLogger("AnnouncementModal");
 const showModal = ref(false);
 const dontShowAgain = ref(false);
 const contentRef = ref(null);
@@ -105,6 +116,7 @@ const titleId = `announcement-title-${Math.random().toString(36).substr(2, 9)}`;
 // 用户关闭状态管理
 const STORAGE_KEY = "cloudpaste_announcement_dismissed";
 const MAX_DISMISSED_COUNT = 7; // 最多记住7个公告
+const dismissedState = useLocalStorage(STORAGE_KEY, "");
 
 // 生成内容唯一标识
 const getContentKey = (content) => {
@@ -120,18 +132,24 @@ const getContentKey = (content) => {
   return Math.abs(hash).toString(36); // 转换为36进制字符串
 };
 
+const contentKey = computed(() => getContentKey(props.content));
+
 // 检查是否已被用户关闭
 const isDismissed = (contentKey) => {
   if (!contentKey) return false;
-  const dismissed = localStorage.getItem(STORAGE_KEY);
-  return dismissed && dismissed.includes(contentKey);
+  return dismissedState.value && dismissedState.value.includes(contentKey);
 };
+
+// 是否存在“未读公告”（用于父组件显示红点等）
+const hasUnseenAnnouncement = computed(() => {
+  return !!(props.enabled && props.content && !isDismissed(contentKey.value));
+});
 
 // 标记为已关闭
 const markDismissed = (contentKey) => {
   if (!contentKey) return;
 
-  const dismissed = localStorage.getItem(STORAGE_KEY) || "";
+  const dismissed = dismissedState.value || "";
   let dismissedArray = dismissed ? dismissed.split(",").filter(Boolean) : [];
 
   // 添加新的哈希（如果不存在）
@@ -144,7 +162,7 @@ const markDismissed = (contentKey) => {
     dismissedArray = dismissedArray.slice(-MAX_DISMISSED_COUNT);
   }
 
-  localStorage.setItem(STORAGE_KEY, dismissedArray.join(","));
+  dismissedState.value = dismissedArray.join(",");
 };
 
 // 使用 Vditor 渲染 Markdown 内容
@@ -186,7 +204,7 @@ const renderContent = async () => {
       },
     });
   } catch (error) {
-    console.error("Vditor 渲染失败:", error);
+    log.error("Vditor 渲染失败:", error);
     // 降级到简单渲染
     if (contentRef.value) {
       contentRef.value.innerHTML = `<div class="text-gray-700 dark:text-gray-300 leading-relaxed whitespace-pre-wrap">${props.content}</div>`;
@@ -197,12 +215,19 @@ const renderContent = async () => {
 // 关闭弹窗
 const closeModal = () => {
   if (props.content) {
-    const contentKey = getContentKey(props.content);
     if (dontShowAgain.value) {
-      markDismissed(contentKey);
+      markDismissed(contentKey.value);
     }
   }
   showModal.value = false;
+};
+
+// 手动打开
+const open = async () => {
+  if (!props.enabled || !props.content) return;
+  showModal.value = true;
+  await nextTick();
+  renderContent();
 };
 
 // 背景点击关闭
@@ -211,17 +236,16 @@ const handleBackdropClick = () => {
 };
 
 // 键盘事件处理
-const handleKeydown = (event) => {
-  if (event.key === "Escape" && showModal.value) {
+onKeyStroke("Escape", () => {
+  if (showModal.value) {
     closeModal();
   }
-};
+});
 
 // 检查是否应该显示公告
 const checkShouldShow = async () => {
-  if (props.enabled && props.content) {
-    const contentKey = getContentKey(props.content);
-    if (!isDismissed(contentKey)) {
+  if (props.enabled && props.content && props.autoOpen) {
+    if (!isDismissed(contentKey.value)) {
       // 延迟显示，让页面先加载完成
       await nextTick();
       setTimeout(async () => {
@@ -236,11 +260,6 @@ const checkShouldShow = async () => {
 
 onMounted(() => {
   checkShouldShow();
-  document.addEventListener("keydown", handleKeydown);
-});
-
-onUnmounted(() => {
-  document.removeEventListener("keydown", handleKeydown);
 });
 
 // 监听 props 变化
@@ -260,6 +279,12 @@ watch(
     }
   }
 );
+
+defineExpose({
+  open,
+  close: closeModal,
+  hasUnseenAnnouncement,
+});
 </script>
 
 <style scoped>

@@ -142,9 +142,11 @@ import { reactive } from "vue";
 import { useI18n } from "vue-i18n";
 import { IconCopy, IconError, IconFolderOpen, IconRefresh, IconSearch } from "@/components/icons";
 import LoadingIndicator from "@/components/common/LoadingIndicator.vue";
+import { copyToClipboard } from "@/utils/clipboard";
 import { getFileIcon as getFileIconUtil } from "@/utils/fileTypeIcons.js";
 import { formatFileSize } from "@/utils/fileUtils.js";
 import { formatDateTime } from "@/utils/timeUtils.js";
+import { createLogger } from "@/utils/logger.js";
 
 // 组件属性
 const props = defineProps({
@@ -191,6 +193,7 @@ const emit = defineEmits(["item-click", "load-more"]);
 
 // 组合式函数
 const { t } = useI18n();
+const log = createLogger("SearchResultList");
 
 // 复制状态管理 - 复用现有文件列表的模式
 const copiedPaths = reactive({});
@@ -239,7 +242,10 @@ const loadMore = () => {
 // 复制路径 - 复用现有文件列表的复制功能
 const copyPath = async (item) => {
   try {
-    await navigator.clipboard.writeText(item.path);
+    const success = await copyToClipboard(item.path);
+    if (!success) {
+      throw new Error("copy_failed");
+    }
 
     // 设置复制状态
     copiedPaths[item.s3_key] = true;
@@ -248,30 +254,8 @@ const copyPath = async (item) => {
     setTimeout(() => {
       copiedPaths[item.s3_key] = false;
     }, 2000);
-
-    console.log("路径已复制:", item.path);
   } catch (error) {
-    console.error("复制路径失败:", error);
-
-    // 降级方案：使用传统的复制方法
-    try {
-      const textArea = document.createElement("textarea");
-      textArea.value = item.path;
-      document.body.appendChild(textArea);
-      textArea.select();
-      document.execCommand("copy");
-      document.body.removeChild(textArea);
-
-      // 设置复制状态
-      copiedPaths[item.s3_key] = true;
-      setTimeout(() => {
-        copiedPaths[item.s3_key] = false;
-      }, 2000);
-
-      console.log("路径已复制（降级方案）:", item.path);
-    } catch (fallbackError) {
-      console.error("复制路径失败（降级方案）:", fallbackError);
-    }
+    log.error("复制路径失败:", error);
   }
 };
 </script>

@@ -1,10 +1,13 @@
 import { reactive, readonly } from "vue";
+import { useDebounceFn, useLocalStorage } from "@vueuse/core";
+import { createLogger } from "@/utils/logger.js";
 
 // localStorage键名
 const STORAGE_KEY = "cloudpaste_tasks";
 
 // 配置项
 const MAX_TASK_AGE_DAYS = 7; // 保留任务的最大天数
+const log = createLogger("TaskManager");
 
 // 任务状态枚举
 export const TaskStatus = {
@@ -29,29 +32,21 @@ const state = reactive({
   nextId: 1, // 下一个任务ID
 });
 
-// 节流保存到localStorage（避免频繁保存导致性能问题）
-let saveTimeout = null;
+// 管理持久化
+const storedTasksState = useLocalStorage(STORAGE_KEY, null);
+const persistNow = () => {
+  storedTasksState.value = {
+    tasks: state.tasks,
+    nextId: state.nextId,
+  };
+};
+const persistDebounced = useDebounceFn(persistNow, 500);
 const saveTasksToStorage = () => {
-  // 清除之前的定时器
-  if (saveTimeout) {
-    clearTimeout(saveTimeout);
+  try {
+    persistDebounced();
+  } catch (error) {
+    log.error("保存任务到本地存储失败:", error);
   }
-
-  // 延迟保存，避免频繁写入
-  saveTimeout = setTimeout(() => {
-    try {
-      localStorage.setItem(
-        STORAGE_KEY,
-        JSON.stringify({
-          tasks: state.tasks,
-          nextId: state.nextId,
-        })
-      );
-      console.log("任务已保存到本地存储");
-    } catch (error) {
-      console.error("保存任务到本地存储失败:", error);
-    }
-  }, 500); // 500ms延迟保存
 };
 
 // 清理过期任务
@@ -70,9 +65,8 @@ const cleanExpiredTasks = (tasks) => {
 // 从localStorage加载任务
 const loadTasksFromStorage = () => {
   try {
-    const storedData = localStorage.getItem(STORAGE_KEY);
-    if (storedData) {
-      const parsedData = JSON.parse(storedData);
+    const parsedData = storedTasksState.value;
+    if (parsedData) {
 
       // 恢复日期对象（JSON.parse会将日期字符串转为字符串）
       if (parsedData.tasks && Array.isArray(parsedData.tasks)) {
@@ -88,11 +82,11 @@ const loadTasksFromStorage = () => {
         state.tasks = cleanedTasks;
         state.nextId = parsedData.nextId || 1;
 
-        console.log(`从本地存储加载了 ${cleanedTasks.length} 个任务`);
+        log.debug(`从本地存储加载了 ${cleanedTasks.length} 个任务`);
       }
     }
   } catch (error) {
-    console.error("从本地存储加载任务失败:", error);
+    log.error("从本地存储加载任务失败:", error);
   }
 };
 
@@ -234,7 +228,7 @@ const taskManager = {
 
       return stats;
     } catch (error) {
-      console.error("获取存储统计信息失败:", error);
+      log.error("获取存储统计信息失败:", error);
       return null;
     }
   },

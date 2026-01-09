@@ -14,6 +14,49 @@ if (typeof globalThis.crypto === "undefined") {
 }
 
 /**
+ * base64 编码工具（兼容 Node / 浏览器 / Workers）
+ */
+const base64EncodeBytes = (bytes) => {
+  // Node 环境：优先用 Buffer，稳定且性能好
+  if (typeof Buffer !== "undefined") {
+    return Buffer.from(bytes).toString("base64");
+  }
+
+  // Web/Worker 环境：把 bytes 转成二进制字符串，再 btoa
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
+};
+
+const base64DecodeToBytes = (base64) => {
+  if (typeof Buffer !== "undefined") {
+    return new Uint8Array(Buffer.from(String(base64), "base64"));
+  }
+
+  const bin = atob(String(base64));
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i += 1) {
+    out[i] = bin.charCodeAt(i);
+  }
+  return out;
+};
+
+const base64EncodeUtf8 = (text) => {
+  const encoder = new TextEncoder();
+  return base64EncodeBytes(encoder.encode(String(text)));
+};
+
+const base64DecodeUtf8 = (base64) => {
+  const decoder = new TextDecoder("utf-8");
+  const bytes = base64DecodeToBytes(base64);
+  return decoder.decode(bytes);
+};
+
+/**
  * 生成密码哈希
  * @param {string} password - 原始密码
  * @returns {Promise<string>} 密码哈希
@@ -53,7 +96,9 @@ export async function encryptValue(value, secret) {
   const secretKey = await crypto.subtle.importKey("raw", encoder.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
 
   const signature = await crypto.subtle.sign("HMAC", secretKey, data);
-  const encryptedValue = "encrypted:" + btoa(String.fromCharCode(...new Uint8Array(signature))) + ":" + btoa(value);
+  const signatureB64 = base64EncodeBytes(new Uint8Array(signature));
+  const payloadB64 = base64EncodeUtf8(value);
+  const encryptedValue = `encrypted:${signatureB64}:${payloadB64}`;
 
   return encryptedValue;
 }
@@ -86,7 +131,7 @@ export async function decryptValue(encryptedValue, secret) {
 
   try {
     // 直接从加密值中提取原始值
-    const originalValue = atob(parts[2]);
+    const originalValue = base64DecodeUtf8(parts[2]);
     return originalValue;
   } catch (error) {
     throw new ValidationError("解密失败: " + error.message);
@@ -127,28 +172,43 @@ export async function decryptIfNeeded(value, encryptionSecret) {
 export async function buildSecretView(cfg, encryptionSecret, options = { mode: "none" }) {
   const mode = options.mode || "none";
   const result = { ...cfg };
+
+  // 统一的 secret 字段集合
+  // - S3: access_key_id / secret_access_key
+  // - WebDAV: password
+  // - OneDrive/GoogleDrive: client_secret / refresh_token
+  // - Telegram: bot_token
+  // - GitHub: token
+  // - HuggingFace: hf_token
+  const SECRET_FIELDS = [
+    "access_key_id",
+    "secret_access_key",
+    "password",
+    "client_secret",
+    "refresh_token",
+    "bot_token",
+    "token",
+    "hf_token",
+  ];
+
   if (mode === "none") {
-    delete result.access_key_id;
-    delete result.secret_access_key;
-    delete result.password;
-    delete result.client_secret;
-    delete result.refresh_token;
+    for (const key of SECRET_FIELDS) {
+      delete result[key];
+    }
     return result;
   }
   if (mode === "masked") {
-    result.access_key_id = maskSecret(await decryptIfNeeded(cfg.access_key_id, encryptionSecret));
-    result.secret_access_key = maskSecret(await decryptIfNeeded(cfg.secret_access_key, encryptionSecret));
-    result.password = maskSecret(await decryptIfNeeded(cfg.password, encryptionSecret));
-    result.client_secret = maskSecret(await decryptIfNeeded(cfg.client_secret, encryptionSecret));
-    result.refresh_token = maskSecret(await decryptIfNeeded(cfg.refresh_token, encryptionSecret));
+    for (const key of SECRET_FIELDS) {
+      if (!Object.prototype.hasOwnProperty.call(cfg, key)) continue;
+      result[key] = maskSecret(await decryptIfNeeded(cfg[key], encryptionSecret));
+    }
     return result;
   }
   if (mode === "plain") {
-    result.access_key_id = await decryptIfNeeded(cfg.access_key_id, encryptionSecret);
-    result.secret_access_key = await decryptIfNeeded(cfg.secret_access_key, encryptionSecret);
-    result.password = await decryptIfNeeded(cfg.password, encryptionSecret);
-    result.client_secret = await decryptIfNeeded(cfg.client_secret, encryptionSecret);
-    result.refresh_token = await decryptIfNeeded(cfg.refresh_token, encryptionSecret);
+    for (const key of SECRET_FIELDS) {
+      if (!Object.prototype.hasOwnProperty.call(cfg, key)) continue;
+      result[key] = await decryptIfNeeded(cfg[key], encryptionSecret);
+    }
     return result;
   }
   return result;

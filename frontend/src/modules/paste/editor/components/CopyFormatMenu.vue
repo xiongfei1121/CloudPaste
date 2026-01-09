@@ -29,16 +29,17 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from "vue";
+import { ref } from "vue";
 import { useI18n } from "vue-i18n";
+import { useEventListener } from "@vueuse/core";
 import { copyToClipboard as clipboardCopy } from "@/utils/clipboard";
-import markdownToWord from "@/utils/markdownToWord";
 import { formatNowForFilename } from "@/utils/timeUtils.js";
 import { saveAs } from "file-saver";
-import { editorContentToPng as snapdomEditorContentToPng } from "@/utils/snapdomCapture";
 import { IconCode, IconDocumentText, IconDownload } from "@/components/icons";
+import { createLogger } from "@/utils/logger.js";
 
 const { t } = useI18n();
+const log = createLogger("CopyFormatMenu");
 
 // Props
 const props = defineProps({
@@ -116,6 +117,9 @@ const exportWordDocument = async () => {
       return;
     }
 
+    // 性能优化：只有真的点击“导出 Word”时，才加载 markdownToWord
+    const { default: markdownToWord } = await import("@/utils/markdownToWord");
+
     const blob = await markdownToWord(markdownContent, {
       title: t("markdown.exportDocumentTitle"),
     });
@@ -126,7 +130,7 @@ const exportWordDocument = async () => {
     saveAs(blob, fileName);
     emit("status-message", t("markdown.messages.wordExported"));
   } catch (error) {
-    console.error("导出Word文档时出错:", error);
+    log.error("导出Word文档时出错:", error);
     emit("status-message", t("markdown.messages.wordExportFailed"));
   } finally {
     emit("close");
@@ -136,7 +140,7 @@ const exportWordDocument = async () => {
 // 导出为PNG图片
 const exportAsPng = async () => {
   if (!props.editor || typeof props.editor.getValue !== "function") {
-    console.error("导出PNG失败：编辑器实例不存在");
+    log.error("导出PNG失败：编辑器实例不存在");
     emit("status-message", t("markdown.messages.editorNotReady"));
     return;
   }
@@ -146,6 +150,9 @@ const exportAsPng = async () => {
   try {
     const timestamp = formatNowForFilename();
     const fileName = `markdown-${timestamp}.png`;
+
+    // 性能优化：只有真的点击“导出 PNG”时，才加载 snapdom
+    const { editorContentToPng: snapdomEditorContentToPng } = await import("@/utils/snapdomCapture");
 
     await new Promise((resolve) => setTimeout(resolve, 1000));
 
@@ -163,7 +170,7 @@ const exportAsPng = async () => {
         emit("status-message", t("markdown.messages.pngExported"));
       },
       onError: (error) => {
-        console.error("导出PNG图片时出错:", error);
+        log.error("导出PNG图片时出错:", error);
 
         if (error instanceof Event && error.type === "error" && error.target instanceof HTMLImageElement) {
           emit("status-message", t("markdown.messages.corsImageError"));
@@ -189,7 +196,7 @@ const exportAsPng = async () => {
       }
     }
   } catch (error) {
-    console.error("导出PNG图片过程中发生错误:", error);
+    log.error("导出PNG图片过程中发生错误:", error);
 
     if (error instanceof Event && error.type === "error") {
       emit("status-message", t("markdown.messages.corsImageError"));
@@ -217,7 +224,7 @@ const copyToClipboard = async (text, successMessage) => {
       throw new Error(t("markdown.copyFailed"));
     }
   } catch (e) {
-    console.error("复制失败:", e);
+    log.error("复制失败:", e);
     emit("status-message", t("markdown.copyFailed"));
   }
 };
@@ -230,15 +237,8 @@ const handleGlobalClick = (event) => {
   }
 };
 
-// 组件挂载
-onMounted(() => {
-  document.addEventListener("click", handleGlobalClick);
-});
-
-// 组件卸载
-onUnmounted(() => {
-  document.removeEventListener("click", handleGlobalClick);
-});
+// 监听全局点击（自动清理）
+useEventListener(document, "click", handleGlobalClick);
 </script>
 
 <style scoped>

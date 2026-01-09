@@ -131,13 +131,16 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from "vue";
+import { ref, computed } from "vue";
+import { useEventListener } from "@vueuse/core";
 import { useI18n } from "vue-i18n";
 import { pwaState, pwaUtils } from "./pwaManager.js";
 import { IconCheckCircle, IconDownload, IconExclamation, IconRefresh } from "@/components/icons";
+import { createLogger } from "@/utils/logger.js";
 
 // 国际化支持
 const { t } = useI18n();
+const log = createLogger("PWAStatus");
 
 // Props
 const props = defineProps({
@@ -273,7 +276,7 @@ const updateApp = async () => {
       }, 1000);
     }
   } catch (error) {
-    console.error("更新失败:", error);
+    log.error("更新失败:", error);
   }
 };
 
@@ -292,23 +295,15 @@ const requestNotification = async () => {
   try {
     await pwaUtils.requestNotificationPermission();
   } catch (error) {
-    console.error("请求通知权限失败:", error);
+    log.error("请求通知权限失败:", error);
   } finally {
     requestingNotification.value = false;
   }
 };
 
-// 生命周期
-onMounted(() => {
-  // 监听PWA更新事件
-  window.addEventListener("pwa-update-available", () => {
-    console.log("[PWA] 收到更新通知");
-  });
-});
-
-onUnmounted(() => {
-  // 清理事件监听器
-  window.removeEventListener("pwa-update-available", () => {});
+// 监听 PWA 更新事件（自动清理）
+useEventListener(window, "pwa-update-available", () => {
+  log.debug("收到更新通知");
 });
 </script>
 

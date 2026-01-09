@@ -179,7 +179,7 @@ export class GoogleDriveUploadOperations {
         providerUploadId: null,
         providerUploadUrl: uploadUrl,
         providerMeta: null,
-        status: "active",
+        status: "initiated",
         expiresAt: null,
       });
       uploadId = id;
@@ -200,15 +200,23 @@ export class GoogleDriveUploadOperations {
     );
 
     return {
+      success: true,
       uploadId,
       strategy: "single_session",
       fileName,
       fileSize,
       partSize: effectivePartSize,
       partCount: calculatedPartCount,
+      totalParts: calculatedPartCount,
+      key: fsPath.replace(/^\/+/, ""),
       session: {
         uploadUrl: sessionUploadUrl,
         providerUploadUrl: uploadUrl,
+      },
+      policy: {
+        refreshPolicy: "server_decides",
+        partsLedgerPolicy: "server_records",
+        retryPolicy: { maxAttempts: 3 },
       },
       mount_id: mount?.id ?? null,
       path: fsPath,
@@ -419,6 +427,11 @@ export class GoogleDriveUploadOperations {
       storageType: row.storage_type,
       sessionId: row.id,
       bytesUploaded: row.bytes_uploaded ?? 0,
+      policy: {
+        refreshPolicy: "server_decides",
+        partsLedgerPolicy: "server_records",
+        retryPolicy: { maxAttempts: 3 },
+      },
     }));
 
     console.log(
@@ -443,12 +456,18 @@ export class GoogleDriveUploadOperations {
    */
   async listMultipartParts(_subPath, uploadId, options = {}) {
     const { mount, db, userIdOrInfo, userType } = options || {};
+    const policy = {
+      refreshPolicy: "server_decides",
+      partsLedgerPolicy: "server_records",
+      retryPolicy: { maxAttempts: 3 },
+    };
 
     if (!uploadId || !db || !mount?.storage_config_id) {
       return {
         success: true,
         uploadId: uploadId || null,
         parts: [],
+        policy,
       };
     }
 
@@ -460,6 +479,7 @@ export class GoogleDriveUploadOperations {
           success: true,
           uploadId: uploadId || null,
           parts: [],
+          policy,
         };
       }
 
@@ -471,6 +491,7 @@ export class GoogleDriveUploadOperations {
           success: true,
           uploadId: uploadId || null,
           parts: [],
+          policy,
         };
       }
 
@@ -504,7 +525,7 @@ export class GoogleDriveUploadOperations {
                   fsPath: sessionRow.fs_path,
                   fileName: sessionRow.file_name,
                   fileSize: totalSize,
-                  status: statusInfo.done ? "completed" : "active",
+                  status: statusInfo.done ? "completed" : "uploading",
                   bytesUploaded,
                   nextExpectedRange: statusInfo.nextExpectedRange ?? null,
                 });
@@ -536,6 +557,7 @@ export class GoogleDriveUploadOperations {
             success: true,
             uploadId: uploadId || null,
             parts: [],
+            policy,
           };
         }
         bytesUploaded = localBytes;
@@ -548,6 +570,7 @@ export class GoogleDriveUploadOperations {
           success: true,
           uploadId: uploadId || null,
           parts: [],
+          policy,
         };
       }
 
@@ -565,6 +588,7 @@ export class GoogleDriveUploadOperations {
         success: true,
         uploadId: uploadId || null,
         parts,
+        policy,
       };
       console.log(
         `[StorageUpload] type=GOOGLE_DRIVE mode=前端分片-single_session status=列出分片 uploadId=${uploadId} 完整分片数=${parts.length}`,
@@ -579,6 +603,7 @@ export class GoogleDriveUploadOperations {
         success: true,
         uploadId: uploadId || null,
         parts: [],
+        policy,
       };
     }
   }
@@ -594,25 +619,48 @@ export class GoogleDriveUploadOperations {
    * @param {Object} options
    * @returns {Promise<Object>}
    */
-  async refreshMultipartUrls(subPath, uploadId, _partNumbers, options = {}) {
+  async signMultipartParts(subPath, uploadId, _partNumbers, options = {}) {
     const { mount, db, userIdOrInfo, userType } = options;
-    if (!db || !mount?.storage_config_id || !uploadId) {
+    if (!uploadId) {
+      throw new DriverError("Google Drive 刷新分片会话失败：缺少 uploadId", {
+        status: 400,
+        expose: true,
+      });
+    }
+
+    const policy = {
+      refreshPolicy: "server_decides",
+      partsLedgerPolicy: "server_records",
+      retryPolicy: { maxAttempts: 3 },
+    };
+
+    // 即使缺少 db/mount，也必须返回严格的最小字段结构（被 DriverContractEnforcer 强制校验）
+    if (!db || !mount?.storage_config_id) {
       return {
-        // 保持返回结构与现有前端适配逻辑兼容
+        success: true,
+        uploadId: String(uploadId),
+        strategy: "single_session",
         session: {
           uploadUrl: `/api/fs/multipart/upload-chunk?upload_id=${encodeURIComponent(uploadId)}`,
           nextExpectedRanges: [],
         },
+        policy,
+        message: "缺少 db/mount，上游会话状态无法刷新，已回退为最小可用返回结构",
       };
     }
 
     const sessionRow = await findUploadSessionById(db, { id: uploadId });
     if (!sessionRow) {
       return {
+        success: true,
+        uploadId: String(uploadId),
+        strategy: "single_session",
         session: {
           uploadUrl: `/api/fs/multipart/upload-chunk?upload_id=${encodeURIComponent(uploadId)}`,
           nextExpectedRanges: [],
         },
+        policy,
+        message: "未找到 upload_sessions 记录，已回退为最小可用返回结构",
       };
     }
 
@@ -652,13 +700,13 @@ export class GoogleDriveUploadOperations {
               fsPath: sessionRow.fs_path,
               fileName: sessionRow.file_name,
               fileSize: totalSize,
-              status: statusInfo.done ? "completed" : "active",
+              status: statusInfo.done ? "completed" : "uploading",
               bytesUploaded,
               nextExpectedRange,
             });
           } catch (syncError) {
             console.warn(
-              "[GoogleDriveUploadOperations] 同步远端会话状态到 upload_sessions 失败(refreshMultipartUrls):",
+              "[GoogleDriveUploadOperations] 同步远端会话状态到 upload_sessions 失败(signMultipartParts):",
               syncError,
             );
           }
@@ -687,7 +735,7 @@ export class GoogleDriveUploadOperations {
               });
             } catch (markError) {
               console.warn(
-                "[GoogleDriveUploadOperations] 标记 upload_sessions 会话为失效失败(refreshMultipartUrls):",
+                "[GoogleDriveUploadOperations] 标记 upload_sessions 会话为失效失败(signMultipartParts):",
                 markError,
               );
             }
@@ -701,7 +749,7 @@ export class GoogleDriveUploadOperations {
         }
 
         console.warn(
-          "[GoogleDriveUploadOperations] 查询 Google Drive 会话状态失败(refreshMultipartUrls)，回退使用本地记录:",
+          "[GoogleDriveUploadOperations] 查询 Google Drive 会话状态失败(signMultipartParts)，回退使用本地记录:",
           statusError,
         );
       }
@@ -710,9 +758,17 @@ export class GoogleDriveUploadOperations {
     const nextRanges = nextExpectedRange ? [String(nextExpectedRange)] : [];
 
     const result = {
+      success: true,
+      uploadId: String(uploadId),
+      strategy: "single_session",
       session: {
         uploadUrl: `/api/fs/multipart/upload-chunk?upload_id=${encodeURIComponent(uploadId)}`,
         nextExpectedRanges: nextRanges,
+      },
+      policy: {
+        refreshPolicy: "server_decides",
+        partsLedgerPolicy: "server_records",
+        retryPolicy: { maxAttempts: 3 },
       },
     };
     console.log(

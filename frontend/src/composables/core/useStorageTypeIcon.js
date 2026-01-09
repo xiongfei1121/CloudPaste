@@ -9,6 +9,10 @@ import {
   IconStorageGitHub,
   IconStorageWebDAV,
   IconStorageLocal,
+  IconStorageTelegram,
+  IconStorageDiscord,
+  IconStorageHuggingFace,
+  IconStorageMirror,
 } from "@/components/icons";
 
 /**
@@ -64,6 +68,34 @@ const STORAGE_TYPE_CONFIG = {
     darkColor: "text-gray-300",
     lightBg: "bg-gray-100",
     darkBg: "bg-gray-700",
+  },
+  TELEGRAM: {
+    icon: IconStorageTelegram,
+    lightColor: "text-sky-500",
+    darkColor: "text-sky-400",
+    lightBg: "bg-sky-100",
+    darkBg: "bg-sky-900/30",
+  },
+  DISCORD: {
+    icon: IconStorageDiscord,
+    lightColor: "text-indigo-600",
+    darkColor: "text-indigo-400",
+    lightBg: "bg-indigo-100",
+    darkBg: "bg-indigo-900/30",
+  },
+  HUGGINGFACE_DATASETS: {
+    icon: IconStorageHuggingFace,
+    lightColor: "text-yellow-600",
+    darkColor: "text-yellow-400",
+    lightBg: "bg-yellow-100",
+    darkBg: "bg-yellow-900/30",
+  },
+  MIRROR: {
+    icon: IconStorageMirror,
+    lightColor: "text-purple-600",
+    darkColor: "text-purple-400",
+    lightBg: "bg-purple-100",
+    darkBg: "bg-purple-900/30",
   },
 };
 

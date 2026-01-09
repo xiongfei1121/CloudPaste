@@ -213,12 +213,14 @@
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch, h } from "vue";
+import { useIntervalFn } from "@vueuse/core";
 import { useI18n } from "vue-i18n";
 import { useGlobalMessage } from "@/composables/core/useGlobalMessage.js";
 import { useThemeMode } from "@/composables/core/useThemeMode.js";
 import { useConfirmDialog } from "@/composables/core/useConfirmDialog";
 import { useStorageTypeIcon } from "@/composables/core/useStorageTypeIcon.js";
 import api from "@/api";
+import { createLogger } from "@/utils/logger.js";
 
 // 图标导入
 import {
@@ -252,6 +254,7 @@ import {
 } from "@/api/services/fsIndexService";
 
 const { t } = useI18n();
+const log = createLogger("FsIndexManagement");
 const { showSuccess, showError } = useGlobalMessage();
 const { isDarkMode: darkMode } = useThemeMode();
 const { dialogState, confirm, handleConfirm, handleCancel } = useConfirmDialog();
@@ -261,7 +264,32 @@ const { getStorageTypeIcon, getStorageTypeIconClass } = useStorageTypeIcon();
 const isLoading = ref(false);
 const indexStatusData = ref(null);
 const viewMode = ref("card");
-let refreshInterval = null;
+
+// 自动刷新（仅当“索引重建进行中”时才会触发真正的请求）
+let autoRefreshInFlight = false;
+const { pause: stopAutoRefresh, resume: startAutoRefresh } = useIntervalFn(
+  async () => {
+    const hasRunningJobs =
+      Array.isArray(indexStatusData.value?.runningJobs) &&
+      indexStatusData.value.runningJobs.length > 0;
+
+    const hasIndexingMounts =
+      Array.isArray(indexStatusData.value?.items) &&
+      indexStatusData.value.items.some((x) => x?.status === "indexing");
+
+    if (!hasRunningJobs && !hasIndexingMounts) return;
+    if (autoRefreshInFlight) return;
+
+    autoRefreshInFlight = true;
+    try {
+      await loadIndexStatus({ silent: true });
+    } finally {
+      autoRefreshInFlight = false;
+    }
+  },
+  2000,
+  { immediate: false }
+);
 
 // 操作面板组件引用
 const actionPanelRef = ref(null);
@@ -527,7 +555,7 @@ async function loadIndexStatus(options = {}) {
     const response = await api.admin.fsIndex.getIndexStatus();
     indexStatusData.value = response.data;
   } catch (error) {
-    console.error("Failed to load index status:", error);
+    log.error("Failed to load index status:", error);
     showError(t("admin.fsIndex.error.loadFailed"));
   } finally {
     if (!silent) isLoading.value = false;
@@ -558,7 +586,7 @@ async function handleRebuildAll() {
     showSuccess(t("admin.fsIndex.success.rebuildStarted"));
     await loadIndexStatus();
   } catch (error) {
-    console.error("Failed to rebuild index:", error);
+    log.error("Failed to rebuild index:", error);
     showError(t("admin.fsIndex.error.rebuildFailed"));
   }
 }
@@ -582,7 +610,7 @@ async function handleApplyDirtyAll() {
     showSuccess(t("admin.fsIndex.success.applyDirtyStarted"));
     await loadIndexStatus();
   } catch (error) {
-    console.error("Failed to apply dirty:", error);
+    log.error("Failed to apply dirty:", error);
     showError(t("admin.fsIndex.error.applyDirtyFailed"));
   }
 }
@@ -604,7 +632,7 @@ async function handleClearAll() {
     showSuccess(t("admin.fsIndex.success.cleared"));
     await loadIndexStatus();
   } catch (error) {
-    console.error("Failed to clear index:", error);
+    log.error("Failed to clear index:", error);
     showError(t("admin.fsIndex.error.clearFailed"));
   }
 }
@@ -626,7 +654,7 @@ async function handleRebuildMount(mountId) {
     showSuccess(t("admin.fsIndex.success.rebuildStarted"));
     await loadIndexStatus();
   } catch (error) {
-    console.error("Failed to rebuild mount:", error);
+    log.error("Failed to rebuild mount:", error);
     showError(t("admin.fsIndex.error.rebuildFailed"));
   }
 }
@@ -648,7 +676,7 @@ async function handleApplyDirtyMount(mountId) {
     showSuccess(t("admin.fsIndex.success.applyDirtyStarted"));
     await loadIndexStatus();
   } catch (error) {
-    console.error("Failed to apply dirty to mount:", error);
+    log.error("Failed to apply dirty to mount:", error);
     showError(t("admin.fsIndex.error.applyDirtyFailed"));
   }
 }
@@ -670,7 +698,7 @@ async function handleClearMount(mountId) {
     showSuccess(t("admin.fsIndex.success.cleared"));
     await loadIndexStatus();
   } catch (error) {
-    console.error("Failed to clear mount index:", error);
+    log.error("Failed to clear mount index:", error);
     showError(t("admin.fsIndex.error.clearFailed"));
   }
 }
@@ -692,7 +720,7 @@ async function handleStopJob(jobId) {
     showSuccess(t("admin.fsIndex.success.stopped"));
     await loadIndexStatus();
   } catch (error) {
-    console.error("Failed to stop job:", error);
+    log.error("Failed to stop job:", error);
     showError(t("admin.fsIndex.error.stopFailed"));
   }
 }
@@ -700,28 +728,10 @@ async function handleStopJob(jobId) {
 // 生命周期
 onMounted(async () => {
   await loadIndexStatus();
-
-  // 每 2 秒自动刷新数据（仅当有“索引重建进行中”的迹象时）
-  // - runningJobs：任务系统已进入 running
-  // - items[].status === 'indexing'：索引状态被预先标记为 indexing（可能早于任务进入 running）
-  refreshInterval = setInterval(async () => {
-    const hasRunningJobs =
-      Array.isArray(indexStatusData.value?.runningJobs) &&
-      indexStatusData.value.runningJobs.length > 0;
-
-    const hasIndexingMounts =
-      Array.isArray(indexStatusData.value?.items) &&
-      indexStatusData.value.items.some((x) => x?.status === "indexing");
-
-    if (!hasRunningJobs && !hasIndexingMounts) return;
-
-    await loadIndexStatus({ silent: true });
-  }, 2000);
+  startAutoRefresh();
 });
 
 onUnmounted(() => {
-  if (refreshInterval) {
-    clearInterval(refreshInterval);
-  }
+  stopAutoRefresh();
 });
 </script>

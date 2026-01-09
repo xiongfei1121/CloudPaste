@@ -20,6 +20,8 @@ import { buildFileInfo } from "../../utils/FileInfoBuilder.js";
 import { createHttpStreamDescriptor, createWebStreamDescriptor } from "../../streaming/StreamDescriptorUtils.js";
 import { buildFullProxyUrl } from "../../../constants/proxy.js";
 import { getMimeTypeFromFilename } from "../../../utils/fileUtils.js";
+import { MasqueradeClient } from "../../../utils/httpMasquerade.js";
+import { decryptIfNeeded } from "../../../utils/crypto.js";
 
 const RELEASE_NOTES_FILENAME = "RELEASE_NOTES.md";
 
@@ -76,6 +78,13 @@ export class GithubReleasesStorageDriver extends BaseDriver {
     this._repoMetaCache = new Map();
 
     this.apiBase = "https://api.github.com";
+
+    // 浏览器伪装客户端
+    this._masqueradeClient = new MasqueradeClient({
+      deviceCategory: "desktop",
+      rotateIP: false,
+      rotateUA: false,
+    });
   }
 
   /**
@@ -96,6 +105,10 @@ export class GithubReleasesStorageDriver extends BaseDriver {
    * - 解析 repo_structure 为内部的 repos 映射表；
    */
   async initialize() {
+    // token 可能以 encrypted:* 存在（由存储配置 CRUD 统一加密写入）
+    const decryptedToken = await decryptIfNeeded(this.token, this.encryptionSecret);
+    this.token = typeof decryptedToken === "string" ? decryptedToken.trim() : decryptedToken;
+
     this._parseRepoStructure();
     this.initialized = true;
   }
@@ -360,13 +373,16 @@ export class GithubReleasesStorageDriver extends BaseDriver {
 
   /**
    * 构建 GitHub API 请求头
+   * @param {Object} extra - 额外的请求头
+   * @param {string} targetUrl - 目标 URL，用于生成 Referer
    * @returns {Record<string,string>}
    */
-  _buildHeaders(extra = {}) {
+  _buildHeaders(extra = {}, targetUrl = null) {
+    const browserHeaders = this._masqueradeClient.buildHeaders({}, targetUrl);
     const headers = {
+      ...browserHeaders,
       Accept: "application/vnd.github+json",
       "X-GitHub-Api-Version": "2022-11-28",
-      "User-Agent": "CloudPaste-GithubReleasesStorageDriver",
     };
     if (this.token && typeof this.token === "string" && this.token.trim().length > 0) {
       headers.Authorization = `Bearer ${this.token.trim()}`;
@@ -587,14 +603,14 @@ export class GithubReleasesStorageDriver extends BaseDriver {
 
   /**
    * 列出目录内容
-   * @param {string} path   挂载视图路径
-   * @param {Object} options
+   * @param {string} subPath 挂载内子路径（subPath-only）
+   * @param {Object} ctx     上下文（mount/path/subPath/db/...）
    */
-  async listDirectory(path, options = {}) {
+  async listDirectory(subPath, ctx = {}) {
     this._ensureInitialized();
-    const { mount, subPath, db, refresh = false } = options;
+    const { mount, db, refresh = false } = ctx;
     const normalizedSubPath = this._normalizeSubPath(subPath);
-    const currentFsPath = path;
+    const currentFsPath = ctx?.path;
     const cacheTtlMs = this._getCacheTtlMs({ mount });
 
     /** @type {Array<Object>} */
@@ -1071,12 +1087,13 @@ export class GithubReleasesStorageDriver extends BaseDriver {
 
   /**
    * 获取文件或目录信息
-   * @param {string} path
-   * @param {Object} options
+   * @param {string} subPath 挂载内子路径（subPath-only）
+   * @param {Object} ctx     上下文（mount/path/subPath/db/...）
    */
-  async getFileInfo(path, options = {}) {
+  async getFileInfo(subPath, ctx = {}) {
     this._ensureInitialized();
-    const { mount, subPath, db } = options;
+    const { mount, db } = ctx;
+    const path = ctx?.path;
     const normalizedSubPath = this._normalizeSubPath(subPath);
 
     // 根目录：作为目录处理
@@ -1222,22 +1239,22 @@ export class GithubReleasesStorageDriver extends BaseDriver {
 
   /**
    * stat 语义与 getFileInfo 保持一致
-   * @param {string} path
-   * @param {Object} options
+   * @param {string} subPath
+   * @param {Object} ctx
    */
-  async stat(path, options = {}) {
-    return await this.getFileInfo(path, options);
+  async stat(subPath, ctx = {}) {
+    return await this.getFileInfo(subPath, ctx);
   }
 
   /**
    * 检查文件或目录是否存在
-   * @param {string} path
-   * @param {Object} options
+   * @param {string} subPath
+   * @param {Object} ctx
    * @returns {Promise<boolean>}
    */
-  async exists(path, options = {}) {
+  async exists(subPath, ctx = {}) {
     this._ensureInitialized();
-    const { subPath, mount } = options;
+    const { mount } = ctx;
     const normalizedSubPath = this._normalizeSubPath(subPath);
 
     if (normalizedSubPath === "/") {
@@ -1287,12 +1304,13 @@ export class GithubReleasesStorageDriver extends BaseDriver {
 
   /**
    * 下载文件，返回 StorageStreamDescriptor
-   * @param {string} path
-   * @param {Object} options
+   * @param {string} subPath 挂载内子路径（subPath-only）
+   * @param {Object} ctx     上下文（mount/path/subPath/...）
    */
-  async downloadFile(path, options = {}) {
+  async downloadFile(subPath, ctx = {}) {
     this._ensureInitialized();
-    const { subPath, mount } = options;
+    const { mount } = ctx;
+    const path = ctx?.path;
     const normalizedSubPath = this._normalizeSubPath(subPath);
 
     const assetResolved = await this._resolveAssetBySubPath(normalizedSubPath, { mount });
@@ -1409,13 +1427,14 @@ export class GithubReleasesStorageDriver extends BaseDriver {
 
   /**
    * 生成下载直链（DIRECT_LINK 能力）
-   * @param {string} path
-   * @param {Object} options
+   * @param {string} subPath 挂载内子路径（subPath-only）
+   * @param {Object} ctx     上下文选项（path/subPath/mount/request/forceDownload/...）
    * @returns {Promise<{url:string,type:string,expiresIn?:number|null}>}
    */
-  async generateDownloadUrl(path, options = {}) {
+  async generateDownloadUrl(subPath, ctx = {}) {
     this._ensureInitialized();
-    const { subPath, mount } = options;
+    const fsPath = ctx?.path;
+    const { mount } = ctx;
     const normalizedSubPath = this._normalizeSubPath(subPath);
 
     const assetResolved = await this._resolveAssetBySubPath(normalizedSubPath, { mount });
@@ -1430,21 +1449,26 @@ export class GithubReleasesStorageDriver extends BaseDriver {
     const cacheTtlMs = this._getCacheTtlMs({ mount });
     const repoMeta = await this._fetchRepoMeta(repo, { refresh: false, cacheTtlMs });
     if (repoMeta && repoMeta.private === true) {
-      return {
-        url: buildFullProxyUrl(options.request || null, path, !!options.forceDownload),
-        type: "proxy",
-        expiresIn: null,
-      };
+      // generateDownloadUrl 只能返回浏览器可用直链（custom_host/native_direct）
+      // 私有仓库无法给出浏览器可用直链（需要 token），这里必须 fail-fast，交给上层降级到 proxy。
+      throw new DriverError("GitHub 私有仓库无法生成浏览器可用直链，请走本地代理 /api/p", {
+        status: ApiStatus.NOT_IMPLEMENTED,
+        code: "DRIVER_ERROR.GITHUB_RELEASES_DIRECT_LINK_NOT_AVAILABLE",
+        expose: true,
+        details: { path: fsPath, subPath: normalizedSubPath, owner: repo.owner, repo: repo.repo },
+      });
     }
 
-    // Release Notes 属于虚拟文件：不具备 GitHub 侧可用直链，回退为本地 /api/p 代理链接
-    // - 注意：FsLinkStrategy 在非 mustProxy 挂载下会优先调用 DIRECT_LINK，因此这里必须给出可用 URL
+    // Release Notes 属于虚拟文件：不具备 GitHub 侧可用直链
+    // - FsLinkStrategy 会捕获异常并自动降级到 PROXY 能力（/api/p）
     if (isReleaseNotes) {
-      return {
-        url: buildFullProxyUrl(options.request || null, path, !!options.forceDownload),
-        type: "proxy",
-        expiresIn: null,
-      };
+      // 虚拟文件没有上游可直出的 URL：必须 fail-fast，交给上层统一走 proxy
+      throw new DriverError("Release Notes 为虚拟文件：无法生成浏览器可用直链，请走本地代理 /api/p", {
+        status: ApiStatus.NOT_IMPLEMENTED,
+        code: "DRIVER_ERROR.GITHUB_RELEASES_VIRTUAL_FILE_NO_DIRECT_LINK",
+        expose: true,
+        details: { path: fsPath, subPath: normalizedSubPath },
+      });
     }
 
     let rawUrl = "";
@@ -1471,18 +1495,19 @@ export class GithubReleasesStorageDriver extends BaseDriver {
     return {
       url: finalUrl,
       type: "native_direct",
-      expiresIn: options.expiresIn || null,
+      expiresIn: ctx.expiresIn || null,
     };
   }
 
   /**
    * 生成本地 /api/p 代理 URL（PROXY 能力）
-   * @param {string} fsPath
-   * @param {Object} options
+   * @param {string} subPath 挂载内子路径（subPath-only）
+   * @param {Object} ctx     上下文选项（path/request/download/channel/...）
    * @returns {Promise<{url:string,type:string,channel:string}>}
    */
-  async generateProxyUrl(fsPath, options = {}) {
-    const { request, download = false, channel = "web" } = options;
+  async generateProxyUrl(subPath, ctx = {}) {
+    const { request, download = false, channel = "web" } = ctx;
+    const fsPath = ctx?.path;
     const proxyUrl = buildFullProxyUrl(request || null, fsPath, download);
     return {
       url: proxyUrl,

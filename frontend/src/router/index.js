@@ -3,24 +3,31 @@
  */
 
 import { createRouter, createWebHistory } from "vue-router";
-import { pwaState } from "../pwa/pwaManager.js";
 import OfflineFallback from "../components/OfflineFallback.vue";
 import { showPageUnavailableToast } from "../pwa/offlineToast.js";
 import { useAuthStore } from "@/stores/authStore.js";
+import { useSiteConfigStore } from "@/stores/siteConfigStore.js";
 import NProgress from "nprogress";
 import "nprogress/nprogress.css";
+import { createLogger } from "@/utils/logger.js";
+
+const log = createLogger("Router");
+
+const isProbablyOffline = () => {
+  return typeof navigator !== "undefined" && navigator.onLine === false;
+};
 
 // 懒加载组件 - 添加离线错误处理
 const createOfflineAwareImport = (importFn, componentName = "页面") => {
   return () =>
     importFn().catch((error) => {
-      console.error("组件加载失败:", error);
+      log.error("组件加载失败:", error);
 
       NProgress.done();
 
       // 如果是离线状态且加载失败，显示离线回退页面和Toast提示
-      if (pwaState.isOffline || !navigator.onLine) {
-        console.log("[离线模式] 组件未缓存，显示离线回退页面");
+      if (isProbablyOffline()) {
+        log.debug("[离线模式] 组件未缓存，显示离线回退页面");
 
         // 显示Toast提示
         setTimeout(() => {
@@ -317,12 +324,18 @@ const router = createRouter({
   history: createWebHistory(),
   routes,
   scrollBehavior(to, from, savedPosition) {
-    // 保持原有的滚动行为
-    if (savedPosition) {
-      return savedPosition;
-    } else {
-      return { top: 0 };
+    // MountExplorer 的滚动由页面自身管理（用于“预览 ↔ 列表”保持原位/恢复）
+    const isMountExplorer = (r) => r?.name === "MountExplorer" || r?.name === "MountExplorerPath";
+    if (isMountExplorer(to) && isMountExplorer(from)) {
+      // 返回 false：表示不做任何自动滚动处理，保持当前滚动
+      return false;
     }
+
+    // 浏览器前进/后退：优先使用浏览器提供的滚动位置
+    if (savedPosition) return savedPosition;
+
+    // 其它页面：保持默认“进新页回到顶部”的行为
+    return { top: 0 };
   },
 });
 
@@ -373,6 +386,44 @@ const hasRoutePermission = (route, authStore) => {
   return true;
 };
 
+// 前台入口开关
+const isPublicEntryDisabled = (pageKey, siteConfigStore) => {
+  if (!siteConfigStore?.isInitialized) return false;
+  if (pageKey === "home") return siteConfigStore.siteHomeEditorEnabled === false;
+  if (pageKey === "upload") return siteConfigStore.siteUploadPageEnabled === false;
+  if (pageKey === "mount-explorer") return siteConfigStore.siteMountExplorerEnabled === false;
+  return false;
+};
+
+// 禁用页面时的默认落点：优先跳到仍然开启的公开页面；全关则跳管理入口
+const getFallbackRoute = (authStore, siteConfigStore) => {
+  if (!siteConfigStore?.isInitialized) {
+    return { name: "Home" };
+  }
+
+  if (siteConfigStore.siteHomeEditorEnabled) return { name: "Home" };
+  if (siteConfigStore.siteUploadPageEnabled) return { name: "Upload" };
+  if (siteConfigStore.siteMountExplorerEnabled) return { name: "MountExplorer" };
+
+  // 三个入口都关了：让用户进管理入口（未登录会自动去登录页）
+  if (authStore?.isAuthenticated) return { path: "/admin" };
+  return { name: "AdminLogin" };
+};
+
+const dispatchPublicEntryDisabledMessage = () => {
+  try {
+    window.dispatchEvent(
+      new CustomEvent("global-message", {
+        detail: {
+          type: "warning",
+          content: "该页面已被管理员关闭，已为你跳转到其它页面。（This page is disabled and you have been redirected.）",
+          duration: 2500,
+        },
+      })
+    );
+  } catch {}
+};
+
 // 获取用户默认路由
 const getDefaultRouteForUser = (authStore) => {
   if (authStore.isAdmin) {
@@ -409,10 +460,16 @@ router.beforeEach(async (to, from, next) => {
 
   try {
     const authStore = useAuthStore();
+    const siteConfigStore = useSiteConfigStore();
 
     // 确保初始化完成，避免刷新时的认证闪烁
     if (!authStore.initialized) {
       await authStore.initialize();
+    }
+
+    // 确保站点配置已初始化：用于“前台入口开关（隐藏入口 + 禁止访问路由）”
+    if (!siteConfigStore.isInitialized && typeof siteConfigStore.initialize === "function") {
+      await siteConfigStore.initialize();
     }
 
     // 自动游客会话：在首次未认证状态下尝试一次基于 Guest API Key 的登录
@@ -425,14 +482,24 @@ router.beforeEach(async (to, from, next) => {
 
     // 如果需要认证且认证状态需要重新验证，则进行验证
     if (to.meta.requiresAuth && authStore.needsRevalidation) {
-      console.log("路由守卫：需要重新验证认证状态");
+      log.debug("路由守卫：需要重新验证认证状态");
       await authStore.validateAuth();
+    }
+
+    // ===== 公开页面入口开关 =====
+    const pageKey = to.meta?.originalPage;
+    if (typeof pageKey === "string" && isPublicEntryDisabled(pageKey, siteConfigStore)) {
+      log.debug("路由守卫：公开页面入口已关闭，执行跳转", { pageKey, to: to.fullPath });
+      dispatchPublicEntryDisabledMessage();
+      NProgress.done();
+      next(getFallbackRoute(authStore, siteConfigStore));
+      return;
     }
 
     // 登录页面访问控制
     if (to.name === "AdminLogin") {
       if (authStore.isAuthenticated) {
-        console.log("路由守卫：已认证用户访问登录页面，重定向到合适的管理页面");
+        log.debug("路由守卫：已认证用户访问登录页面，重定向到合适的管理页面");
         const defaultRoute = getDefaultRouteForUser(authStore);
         NProgress.done();
         if (defaultRoute) {
@@ -450,7 +517,7 @@ router.beforeEach(async (to, from, next) => {
     // 管理页面权限检查 - 检查是否是admin路由或其子路由
     if (to.meta.requiresAuth && (to.path.startsWith("/admin") || to.matched.some((record) => record.path.startsWith("/admin")))) {
       if (!authStore.isAuthenticated) {
-        console.log("路由守卫：用户未认证，重定向到登录页面");
+        log.debug("路由守卫：用户未认证，重定向到登录页面");
         NProgress.done();
         next({ name: "AdminLogin", query: { redirect: to.fullPath } });
         return;
@@ -461,7 +528,7 @@ router.beforeEach(async (to, from, next) => {
       const hasManagementAccess = authStore.isAdmin || authStore.authType === "apikey";
 
       if (!hasManagementAccess) {
-        console.log("路由守卫：用户无管理权限，重定向到首页");
+        log.debug("路由守卫：用户无管理权限，重定向到首页");
         NProgress.done();
         next({ name: "Home" });
         return;
@@ -469,8 +536,8 @@ router.beforeEach(async (to, from, next) => {
 
       // 处理 /admin 根路径访问，进行智能重定向
       if (to.path === "/admin") {
-        console.log("路由守卫：访问 /admin 根路径，进行重定向");
-        console.log("路由守卫：用户权限详情", {
+        log.debug("路由守卫：访问 /admin 根路径，进行重定向");
+        log.debug("路由守卫：用户权限详情", {
           authType: authStore.authType,
           isAdmin: authStore.isAdmin,
           hasTextSharePermission: authStore.hasTextSharePermission,
@@ -481,10 +548,10 @@ router.beforeEach(async (to, from, next) => {
         const defaultRoute = getDefaultRouteForUser(authStore);
         NProgress.done();
         if (defaultRoute) {
-          console.log("路由守卫：重定向到默认页面", defaultRoute);
+          log.debug("路由守卫：重定向到默认页面", defaultRoute);
           next({ name: defaultRoute });
         } else {
-          console.log("路由守卫：用户无任何管理权限，重定向到首页");
+          log.debug("路由守卫：用户无任何管理权限，重定向到首页");
           next({ name: "Home" });
         }
         return;
@@ -494,7 +561,7 @@ router.beforeEach(async (to, from, next) => {
       if (to.name && to.name.startsWith("Admin")) {
         // 检查用户是否有访问目标页面的权限
         if (!hasRoutePermission(to, authStore)) {
-          console.log("路由守卫：用户无权限访问目标页面，进行智能重定向", {
+          log.debug("路由守卫：用户无权限访问目标页面，进行智能重定向", {
             targetRoute: to.name,
             userPermissions: {
               isAdmin: authStore.isAdmin,
@@ -508,10 +575,10 @@ router.beforeEach(async (to, from, next) => {
           const defaultRoute = getDefaultRouteForUser(authStore);
           NProgress.done();
           if (defaultRoute) {
-            console.log("路由守卫：重定向到默认页面", defaultRoute);
+            log.debug("路由守卫：重定向到默认页面", defaultRoute);
             next({ name: defaultRoute });
           } else {
-            console.log("路由守卫：用户无任何管理权限，重定向到首页");
+            log.debug("路由守卫：用户无任何管理权限，重定向到首页");
             next({ name: "Home" });
           }
           return;
@@ -519,7 +586,7 @@ router.beforeEach(async (to, from, next) => {
 
         // 特殊处理：如果访问 /admin 根路径，重定向到合适的页面
         if (to.name === "AdminDashboard" && !authStore.isAdmin) {
-          console.log("路由守卫：API密钥用户访问仪表板，重定向到默认页面");
+          log.debug("路由守卫：API密钥用户访问仪表板，重定向到默认页面");
           const defaultRoute = getDefaultRouteForUser(authStore);
           if (defaultRoute && defaultRoute !== "AdminDashboard") {
             NProgress.done();
@@ -529,7 +596,7 @@ router.beforeEach(async (to, from, next) => {
         }
       }
 
-      console.log("路由守卫：管理权限验证通过", {
+      log.debug("路由守卫：管理权限验证通过", {
         isAdmin: authStore.isAdmin,
         authType: authStore.authType,
         isGuest: authStore.isGuest,
@@ -544,7 +611,7 @@ router.beforeEach(async (to, from, next) => {
       // 移除自动重定向逻辑，让组件自己处理权限显示
       // 这样用户可以看到友好的"无权限"提示而不是突然被重定向
 
-      console.log("路由守卫：挂载页面访问", {
+      log.debug("路由守卫：挂载页面访问", {
         isAuthenticated: authStore.isAuthenticated,
         hasMountPermission: authStore.hasMountPermission,
         authType: authStore.authType,
@@ -555,7 +622,7 @@ router.beforeEach(async (to, from, next) => {
       if (isKeyLikeUser && authStore.hasMountPermission && to.params.pathMatch) {
         const requestedPath = "/" + (Array.isArray(to.params.pathMatch) ? to.params.pathMatch.join("/") : to.params.pathMatch);
         if (!authStore.hasPathPermission(requestedPath)) {
-          console.log("路由守卫：用户无此路径权限，重定向到基本路径");
+          log.debug("路由守卫：用户无此路径权限，重定向到基本路径");
           const basePath = authStore.userInfo.basicPath || "/";
           const redirectPath = buildMountExplorerRoutePath(basePath);
           NProgress.done();
@@ -567,7 +634,7 @@ router.beforeEach(async (to, from, next) => {
 
     next();
   } catch (error) {
-    console.error("路由守卫错误:", error);
+    log.error("路由守卫错误:", error);
     NProgress.done();
     // 发生错误时允许继续，避免阻塞路由
     next();
@@ -576,19 +643,19 @@ router.beforeEach(async (to, from, next) => {
 
 // 路由错误处理
 router.onError((error) => {
-  console.error("路由错误:", error);
+  log.error("路由错误:", error);
 
   NProgress.done();
 
   // 如果是离线状态下的组件加载失败，不需要额外处理
   // 因为 createOfflineAwareImport 已经处理了
-  if (pwaState.isOffline || !navigator.onLine) {
-    console.log("[离线模式] 路由错误已由离线回退机制处理");
+  if (pwaState.isOffline) {
+    log.debug("[离线模式] 路由错误已由离线回退机制处理");
     return;
   }
 
   // 在线状态下的其他错误，可以添加额外的错误处理逻辑
-  console.error("在线状态下的路由错误:", error);
+  log.error("在线状态下的路由错误:", error);
 });
 
 // 路由后置守卫 - 处理页面标题和调试信息
@@ -683,7 +750,7 @@ router.afterEach(async (to, from) => {
         title = to.meta?.title || siteTitle;
     }
   } catch (error) {
-    console.warn("无法加载国际化标题或站点配置，使用默认标题:", error);
+    log.warn("无法加载国际化标题或站点配置，使用默认标题:", error);
     title = to.meta?.title || "CloudPaste";
   }
 
@@ -691,17 +758,17 @@ router.afterEach(async (to, from) => {
 
   const fromPage = from.meta?.originalPage || "unknown";
   const toPage = to.meta?.originalPage || "unknown";
-  console.log(`页面从 ${fromPage} 切换到 ${toPage}`);
+  log.debug(`页面从 ${fromPage} 切换到 ${toPage}`);
 
   try {
     const authStore = useAuthStore();
-    console.log(`页面切换后权限状态: 认证类型=${authStore.authType}, 已认证=${authStore.isAuthenticated}, 管理员=${authStore.isAdmin}`);
+    log.debug(`页面切换后权限状态: 认证类型=${authStore.authType}, 已认证=${authStore.isAuthenticated}, 管理员=${authStore.isAdmin}`);
   } catch (error) {
-    console.warn("无法获取认证状态:", error);
+    log.warn("无法获取认证状态:", error);
   }
 
   // 保持原有的路径日志
-  console.log("路径变化检测:", to.path);
+  log.debug("路径变化检测:", to.path);
 });
 
 // 导出路由实例
@@ -756,7 +823,7 @@ export const routerUtils = {
 
       router.push(route);
     } else {
-      console.warn(`未知页面: ${page}`);
+      log.warn(`未知页面: ${page}`);
       router.push({ name: "Home" });
     }
   },

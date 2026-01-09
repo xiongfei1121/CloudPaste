@@ -2,6 +2,7 @@ import { api } from "@/api";
 import { useAuthStore } from "@/stores/authStore.js";
 import { usePathPassword } from "@/composables/usePathPassword.js";
 import { useExplorerSettings } from "@/composables/useExplorerSettings.js";
+import { createLogger } from "@/utils/logger.js";
 
 /** @typedef {import("@/types/fs").FsDirectoryResponse} FsDirectoryResponse */
 /** @typedef {import("@/types/fs").FsDirectoryItem} FsDirectoryItem */
@@ -20,6 +21,7 @@ export function useFsService() {
   const authStore = useAuthStore();
   const pathPassword = usePathPassword();
   const explorerSettings = useExplorerSettings();
+  const log = createLogger("FsService");
 
   // 目录列表条件请求缓存（强一致性路线：依赖后端 ETag；前端仅做“可验证缓存”）
   const DIRECTORY_LIST_CACHE_LIMIT = 50;
@@ -87,12 +89,16 @@ export function useFsService() {
   /**
    * 获取目录列表
    * @param {string} path
-   * @param {{ refresh?: boolean }} [options]
+   * @param {{ refresh?: boolean, cursor?: (string|null), limit?: (number|null), paged?: boolean }} [options]
    * @returns {Promise<FsDirectoryResponse>}
    */
   const getDirectoryList = async (path, options = {}) => {
     const normalizedPath = normalizeDirApiPath(path || "/");
     const isAdmin = authStore.isAdmin;
+    const cursor = options && options.cursor != null && String(options.cursor).trim() ? String(options.cursor).trim() : null;
+    const limitRaw = options && options.limit != null && options.limit !== "" ? Number(options.limit) : null;
+    const limit = limitRaw != null && Number.isFinite(limitRaw) && limitRaw > 0 ? Math.floor(limitRaw) : null;
+    const paged = options && options.paged === true;
 
     // 取消之前的目录请求，避免竞态条件
     cancelDirectoryRequest();
@@ -101,14 +107,21 @@ export function useFsService() {
     const controller = new AbortController();
     abortControllers.directory = controller;
 
-    /** @type {{ refresh?: boolean; headers?: Record<string,string>; signal?: AbortSignal }} */
+    /** @type {{ refresh?: boolean; cursor?: (string|null); limit?: (number|null); paged?: boolean; headers?: Record<string,string>; signal?: AbortSignal }} */
     const requestOptions = {
       refresh: options.refresh,
+      cursor,
+      limit,
+      paged,
       signal: controller.signal,
     };
 
-    const cached = directoryListCache.get(normalizedPath) || null;
-    const shouldUseConditional = !options.refresh && !!cached?.etag;
+    // 分页请求的 cache key 必须包含 cursor/limit/paged
+    const cacheKey = `${normalizedPath}|cursor=${cursor || ""}|limit=${limit || ""}|paged=${paged ? "1" : "0"}`;
+
+    const cached = directoryListCache.get(cacheKey) || null;
+    // 只有“首页”才值得走 If-None-Match：分页页的 304 对后端没意义（后端仍要打上游才能算 ETag）
+    const shouldUseConditional = !options.refresh && !cursor && !!cached?.etag;
 
     // 非管理员访问时，如果已有 token，则附带在请求头中
     if (!isAdmin) {
@@ -144,19 +157,18 @@ export function useFsService() {
       const data = /** @type {FsDirectoryResponse} */ (response.data);
       const etag = typeof data?.dirEtag === "string" && data.dirEtag ? data.dirEtag : null;
       if (etag && data) {
-        setDirectoryListCache(normalizedPath, { etag, data });
+        setDirectoryListCache(cacheKey, { etag, data });
       }
       return data;
     } catch (error) {
       // 请求被取消时，静默处理，不抛出错误
       if (error.name === "AbortError") {
-        console.log("目录请求已取消:", normalizedPath);
         return null;
       }
 
       // 目录路径密码缺失或失效：触发前端密码验证流程
       if (!isAdmin && error && error.code === "FS_PATH_PASSWORD_REQUIRED") {
-        console.warn("目录需要路径密码，触发密码验证流程:", { path: normalizedPath, error });
+        log.warn("目录需要路径密码，触发密码验证流程:", { path: normalizedPath, error });
         // 旧 token 失效，清除后重新走验证
         pathPassword.removePathToken(normalizedPath);
         pathPassword.setPendingPath(normalizedPath);
@@ -229,7 +241,6 @@ export function useFsService() {
     } catch (error) {
       // 请求被取消时，静默处理，不抛出错误
       if (error.name === "AbortError") {
-        console.log("文件信息请求已取消:", path);
         return null;
       }
 
@@ -240,7 +251,7 @@ export function useFsService() {
           normalizedPath && normalizedPath !== "/" ? `${normalizedPath.replace(/\/+$/, "").split("/").slice(0, -1).join("/")}/` : "/";
         const ownerPath = parentDir.startsWith("/") ? parentDir : `/${parentDir}`;
 
-        console.warn("文件需要路径密码，触发密码验证流程:", { path: normalizedPath, ownerPath, error });
+        log.warn("文件需要路径密码，触发密码验证流程:", { path: normalizedPath, ownerPath, error });
 
         // 旧 token 失效，清除后重新走验证
         pathPassword.removePathToken(ownerPath);
@@ -292,7 +303,9 @@ export function useFsService() {
     }
 
     try {
-      const cached = directoryListCache.get(normalizedPath) || null;
+      // prefetch 只用于“首页”，因此 key 固定为 cursor/limit/paged 都为空
+      const baseKey = `${normalizedPath}|cursor=|limit=|paged=0`;
+      const cached = directoryListCache.get(baseKey) || null;
       if (!options.refresh && cached?.etag) {
         requestOptions.headers = {
           ...(requestOptions.headers || {}),
@@ -314,7 +327,7 @@ export function useFsService() {
       const data = /** @type {FsDirectoryResponse} */ (response.data);
       const etag = typeof data?.dirEtag === "string" && data.dirEtag ? data.dirEtag : null;
       if (etag && data) {
-        setDirectoryListCache(normalizedPath, { etag, data });
+        setDirectoryListCache(baseKey, { etag, data });
       }
       return data;
     } catch (error) {
@@ -494,7 +507,6 @@ export function useFsService() {
     cancelJob,
     listJobs,
     deleteJob,
-    // 请求取消方法
     cancelDirectoryRequest,
     cancelFileInfoRequest,
     cancelAllRequests,

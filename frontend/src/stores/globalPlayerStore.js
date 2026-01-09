@@ -5,6 +5,10 @@
 
 import { defineStore } from "pinia";
 import { ref, computed, shallowRef } from "vue";
+import { useLocalStorage } from "@vueuse/core";
+import { createLogger } from "@/utils/logger.js";
+
+const log = createLogger("GlobalPlayerStore");
 
 // localStorage 存储键
 const STORAGE_KEY = "cloudpaste-global-player";
@@ -409,6 +413,8 @@ export const useGlobalPlayerStore = defineStore("globalPlayer", () => {
 
   // ===== 持久化方法 =====
 
+  const storedState = useLocalStorage(STORAGE_KEY, null, { writeDefaults: false });
+
   const saveToStorage = () => {
     try {
       const state = {
@@ -417,32 +423,30 @@ export const useGlobalPlayerStore = defineStore("globalPlayer", () => {
         loopMode: loopMode.value,
         orderMode: orderMode.value,
       };
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      storedState.value = state;
     } catch (e) {
-      console.warn("保存播放器状态失败:", e);
+      log.warn("保存播放器状态失败:", e);
     }
   };
 
   const loadFromStorage = () => {
     try {
-      const stored = localStorage.getItem(STORAGE_KEY);
-      if (!stored) return;
-
-      const state = JSON.parse(stored);
+      const state = storedState.value;
+      if (!state || typeof state !== "object") return;
       if (state.displayMode) displayMode.value = state.displayMode;
       if (typeof state.volume === "number") volume.value = state.volume;
       if (state.loopMode) loopMode.value = state.loopMode;
       if (state.orderMode) orderMode.value = state.orderMode;
     } catch (e) {
-      console.warn("加载播放器状态失败:", e);
+      log.warn("加载播放器状态失败:", e);
     }
   };
 
   const clearStorage = () => {
     try {
-      localStorage.removeItem(STORAGE_KEY);
+      storedState.remove?.();
     } catch (e) {
-      console.warn("清除播放器状态失败:", e);
+      log.warn("清除播放器状态失败:", e);
     }
   };
 

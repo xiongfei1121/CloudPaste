@@ -4,8 +4,12 @@
  */
 
 import { BasePlugin } from "@uppy/core";
-// fsApi direct calls removed; use driver hooks via resolveStorageConfigId
 import { resolveDriverByConfigId } from "@/modules/storage-core/drivers/registry.js";
+import { readClientLedgerParts } from "../storage-adapter/multipart/partsLedger.js";
+import { PathResolver } from "../storage-adapter/tools.js";
+import { createLogger } from "@/utils/logger.js";
+
+const log = createLogger("ServerResumePlugin");
 
 export default class ServerResumePlugin extends BasePlugin {
   static VERSION = "1.0.0";
@@ -23,6 +27,10 @@ export default class ServerResumePlugin extends BasePlugin {
       // 用户选择相关配置
       maxSelectionOptions: 5, // 最多显示几个选项
       showMatchScore: true, // 是否显示匹配分数
+
+      // client_keeps（HuggingFace 等）需要用 localStorage 读本地账本
+      storagePrefix: "uppy_multipart_",
+      cacheExpiry: 24 * 60 * 60 * 1000, // 24小时
       ...opts,
     });
 
@@ -52,13 +60,13 @@ export default class ServerResumePlugin extends BasePlugin {
     // PreProcessor钩子
     this.uppy.addPreProcessor(this.prepareUpload);
 
-    console.log("[ServerResumePlugin] 插件已安装");
+    log.debug("插件已安装");
   }
 
   uninstall() {
     this.uppy.removePreProcessor(this.prepareUpload);
 
-    console.log("[ServerResumePlugin] 插件已卸载");
+    log.debug("插件已卸载");
   }
 
   /**
@@ -71,14 +79,14 @@ export default class ServerResumePlugin extends BasePlugin {
       return Promise.resolve();
     }
 
-    console.log("[ServerResumePlugin] 开始检查断点续传...");
+    log.debug("开始检查断点续传...");
 
     const promises = fileIDs.map(async (fileID) => {
       const file = this.uppy.getFile(fileID);
 
       // 检查文件是否会使用分片上传
       if (!this.shouldUseMultipart(file)) {
-        console.log(`[ServerResumePlugin] 文件 ${file.name} 不使用分片上传，跳过断点续传检查`);
+        log.debug(`文件 ${file.name} 不使用分片上传，跳过断点续传检查`);
         this.uppy.emit("preprocess-complete", file);
         return;
       }
@@ -94,35 +102,25 @@ export default class ServerResumePlugin extends BasePlugin {
         const resumableUploads = await this.checkResumableUploads(file);
 
         if (resumableUploads.length > 0) {
-          console.log(`[ServerResumePlugin] 发现 ${resumableUploads.length} 个可恢复的上传`);
+          log.debug(`发现 ${resumableUploads.length} 个可恢复的上传`);
 
-          if (this.opts.showConfirmDialog) {
-            // 显示选择对话框
-            const selectedUpload = await new Promise((resolve) => {
-              this.showMultipleUploadsDialog(file, resumableUploads, resolve);
-            });
+          const selectedUpload = await new Promise((resolve) => {
+            this.showMultipleUploadsDialog(file, resumableUploads, resolve);
+          });
 
-            if (selectedUpload) {
-              // 标记文件为可恢复状态
-              this.uppy.setFileMeta(fileID, {
-                resumable: true,
-                existingUpload: selectedUpload,
-                serverResume: true,
-              });
-
-              console.log(`[ServerResumePlugin] 文件 ${file.name} 已标记为可恢复`);
-            }
-          } else {
-            // 自动选择最佳匹配
+          if (selectedUpload) {
+            // 标记文件为可恢复状态
             this.uppy.setFileMeta(fileID, {
               resumable: true,
-              existingUpload: resumableUploads[0],
+              existingUpload: selectedUpload,
               serverResume: true,
             });
+
+            log.debug(`文件 ${file.name} 已标记为可恢复`);
           }
         }
       } catch (error) {
-        console.error(`[ServerResumePlugin] 检查可恢复上传失败:`, error);
+        log.error(`[ServerResumePlugin] 检查可恢复上传失败:`, error);
         // 不阻断正常上传流程
       }
 
@@ -190,10 +188,15 @@ export default class ServerResumePlugin extends BasePlugin {
         return [];
       }
 
+      // “是否真的有进度”应该在 showSelectDialog 里判断：
+      // - server_can_list：看 listParts
+      // - client_keeps：看本地账本
+      const rawUploads = Array.isArray(response.data.uploads) ? response.data.uploads : [];
+
       // 使用智能匹配算法找到最佳匹配
-      return this.findBestMatches(response.data.uploads, file);
+      return this.findBestMatches(rawUploads, file);
     } catch (error) {
-      console.error("[ServerResumePlugin] 检查可恢复上传失败:", error);
+      log.error("[ServerResumePlugin] 检查可恢复上传失败:", error);
       return [];
     }
   }
@@ -221,6 +224,18 @@ export default class ServerResumePlugin extends BasePlugin {
    */
   calculateMatchScore(upload, file) {
     let score = 0;
+
+    // 文件大小匹配
+    const uploadSizeRaw = upload?.fileSize ?? upload?.file_size ?? null;
+    const uploadSize = uploadSizeRaw == null ? null : Number(uploadSizeRaw);
+    const currentSize = typeof file?.size === "number" ? file.size : null;
+    if (uploadSize != null && Number.isFinite(uploadSize) && currentSize != null && Number.isFinite(currentSize)) {
+      if (uploadSize === currentSize) {
+        score += 0.3;
+      } else {
+        return 0;
+      }
+    }
 
     // 文件名匹配 (40%)
     if (upload.key.endsWith(file.name)) {
@@ -263,17 +278,17 @@ export default class ServerResumePlugin extends BasePlugin {
   }
 
   /**
-   * 🔧 新增：显示选择对话框
+   * 
    * 通过事件系统与 Vue 组件通信
    */
   async showSelectDialog(options) {
     // 为每个上传获取分片信息、计算匹配分数和添加文件大小信息
-    const uploadsWithDetails = await Promise.all(
+    const uploadsWithDetails = (await Promise.all(
       options.uploads.map(async (upload) => {
         try {
           // 获取该上传的分片信息
           const currentPath = this.getCurrentPath();
-          const fullPath = currentPath.endsWith("/") ? currentPath + options.file.name : currentPath + "/" + options.file.name;
+          const fullPath = `/${this.buildExpectedPath(options.file)}`.replace(/\/+/g, "/");
 
           let partsResponse;
           if (typeof this.opts.resolveStorageConfigId === 'function') {
@@ -290,28 +305,70 @@ export default class ServerResumePlugin extends BasePlugin {
           if (!partsResponse) return null;
 
           let uploadedParts = [];
+          let partErrors = [];
           if (partsResponse.success && partsResponse.data.parts) {
             uploadedParts = partsResponse.data.parts;
-            console.log(`[ServerResumePlugin] 上传 ${upload.uploadId.substring(0, 8)}... 有 ${uploadedParts.length} 个分片`);
+            log.debug(`上传 ${upload.uploadId.substring(0, 8)}... 有 ${uploadedParts.length} 个分片`);
           }
+          if (partsResponse.success && Array.isArray(partsResponse.data?.errors)) {
+            partErrors = partsResponse.data.errors;
+          }
+
+          // 服务端 list-parts 会返回空 parts，但 policy 会标记 client_keeps
+          // 这时需要改用本地账本判断是否“真的有进度”，否则会被下面的过滤逻辑误判为 0%。
+          try {
+            const policy = partsResponse?.data?.policy || null;
+            const ledgerPolicyRaw =
+              policy?.partsLedgerPolicy ?? policy?.parts_ledger_policy ?? null;
+            const ledgerPolicy = String(ledgerPolicyRaw || "");
+            if (ledgerPolicy === "client_keeps") {
+              const localParts = await this.getLocalUploadedParts(upload.key);
+              if (Array.isArray(localParts) && localParts.length > 0) {
+                uploadedParts = localParts;
+                log.debug(`client_keeps：从本地账本读取到 ${localParts.length} 个分片`);
+              }
+            }
+          } catch {}
+
+          // 没有任何进度（0 分片且无错误）时，不应打扰用户弹窗
+          if (Array.isArray(uploadedParts) && uploadedParts.length === 0 && Array.isArray(partErrors) && partErrors.length === 0) {
+            return null;
+          }
+
+          const bytesUploaded = Array.isArray(uploadedParts)
+            ? uploadedParts.reduce((sum, p) => {
+                const s = Number(p?.size ?? p?.Size ?? 0);
+                if (!Number.isFinite(s) || s <= 0) return sum;
+                return sum + s;
+              }, 0)
+            : 0;
 
           return {
             ...upload,
             matchScore: this.calculateMatchScore(upload, options.file),
             fileSize: options.file.size,
             uploadedParts: uploadedParts, // 添加分片信息
+            partErrors: partErrors, // 添加失败分片信息
+            bytesUploaded,
           };
         } catch (error) {
-          console.error(`[ServerResumePlugin] 获取上传 ${upload.uploadId} 的分片信息失败:`, error);
+          log.error(`[ServerResumePlugin] 获取上传 ${upload.uploadId} 的分片信息失败:`, error);
           return {
             ...upload,
             matchScore: this.calculateMatchScore(upload, options.file),
             fileSize: options.file.size,
             uploadedParts: [], // 失败时使用空数组
+            partErrors: [],
           };
         }
       })
-    );
+    )).filter(Boolean);
+
+    // 过滤后没有可续传项：直接当作“没有可恢复上传”
+    if (!uploadsWithDetails || uploadsWithDetails.length === 0) {
+      try { options.onCancel?.(); } catch {}
+      return;
+    }
 
     this.uppy.emit("server-resume-select-dialog", {
       file: options.file,
@@ -341,12 +398,35 @@ export default class ServerResumePlugin extends BasePlugin {
   }
 
   /**
+   * 从 localStorage 读取“客户端账本”的已上传分片（client_keeps）
+   * - StorageAdapter 会用 storagePrefix + storageKey 保存 {parts,timestamp}
+   * - 这里只做“是否有进度”的判断：返回的数组长度>0 即视为可恢复
+   */
+  async getLocalUploadedParts(storageKey) {
+    const parts = await readClientLedgerParts({
+      storageKey,
+      storagePrefix: this.opts.storagePrefix || "uppy_multipart_",
+      cacheExpiry: this.opts.cacheExpiry || 24 * 60 * 60 * 1000,
+    });
+
+    // 统一为 {partNumber, etag, size} 形状，便于后续 UI/日志
+    return (Array.isArray(parts) ? parts : [])
+      .map((p) => ({
+        partNumber: Number(p?.PartNumber ?? p?.partNumber),
+        etag: p?.ETag ?? p?.etag ?? null,
+        size: Number(p?.Size ?? p?.size ?? 0),
+      }))
+      .filter((p) => Number.isFinite(p.partNumber) && p.partNumber > 0);
+  }
+
+  /**
    * 构建期望的文件路径
    */
   buildExpectedPath(file) {
     const currentPath = this.getCurrentPath();
-    const normalizedPath = currentPath.endsWith("/") ? currentPath : currentPath + "/";
-    return (normalizedPath + file.name).replace(/^\/+/, "");
+    const resolver = new PathResolver(currentPath);
+    const full = resolver.buildFullPathFromKey(file?.name || "");
+    return String(full || "").replace(/^\/+/, "");
   }
 
   /**

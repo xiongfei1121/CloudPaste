@@ -1,7 +1,9 @@
 <script setup>
-import { ref, computed, watch, onMounted } from "vue";
+import { ref, computed, watch, onMounted, reactive } from "vue";
 import { useI18n } from "vue-i18n";
+import { storeToRefs } from "pinia";
 import { useAdminStorageConfigService } from "@/modules/admin/services/storageConfigService.js";
+import { useStorageConfigsStore } from "@/stores/storageConfigsStore.js";
 import {
   STORAGE_UNITS,
   getDefaultStorageByProvider,
@@ -10,11 +12,11 @@ import {
   normalizeDefaultFolder,
   isValidUrl,
 } from "@/modules/storage-core/schema/adminStorageSchemas.js";
-import { useAdminStorageTypeBehavior } from "@/modules/admin/storage/adminStorageTypeBehavior.js";
-import { api } from "@/api";
 import { IconEye, IconEyeOff, IconRefresh } from "@/components/icons";
+import { createLogger } from "@/utils/logger.js";
 
 const { t } = useI18n();
+const log = createLogger("ConfigForm");
 
 // 接收属性
 const props = defineProps({
@@ -35,8 +37,9 @@ const props = defineProps({
 // 定义事件
 const emit = defineEmits(["close", "success"]);
 
-// 存储类型元数据（从后端 /api/storage-types 动态加载）
-const storageTypesMeta = ref([]);
+// 存储类型元数据（从后端 /api/storage-types 动态加载，统一走 store 缓存）
+const storageConfigsStore = useStorageConfigsStore();
+const { storageTypesMeta } = storeToRefs(storageConfigsStore);
 
 // 表单数据
 const formData = ref({
@@ -76,28 +79,8 @@ const success = ref("");
 
 const { getStorageConfigReveal, updateStorageConfig, createStorageConfig } = useAdminStorageConfigService();
 
-// 行为配置 hook 依赖的辅助 ref
-const isEditRef = computed(() => props.isEdit);
 const configIdRef = computed(() => (props.config && props.config.id) || null);
-
-const {
-  currentType,
-  isSecretField,
-  isSecretVisible,
-  isSecretRevealing,
-  handleSecretToggle,
-  getSecretInputType,
-  isFieldDisabled: behaviorIsFieldDisabled,
-  isFieldRequiredOnCreate: behaviorIsFieldRequiredOnCreate,
-  formatFieldOnBlur,
-  ensureTypeDefaults,
-} = useAdminStorageTypeBehavior({
-  formData,
-  isEditRef,
-  configIdRef,
-  getStorageConfigReveal,
-  errorRef: error,
-});
+const currentType = computed(() => formData.value.storage_type || "");
 
 // 计算表单标题与类型辅助标志
 const isWebDavType = computed(() => formData.value.storage_type === "WEBDAV");
@@ -110,23 +93,28 @@ const formTitle = computed(() => {
 
 // 输入处理函数
 const trimInput = (field) => {
-  if (formData.value[field]) {
-    formData.value[field] = formData.value[field].trim();
+  const value = formData.value[field];
+  if (typeof value === "string") {
+    formData.value[field] = value.trim();
   }
 };
 
 const formatUrl = (field) => {
-  if (!formData.value[field]) {
+  const value = formData.value[field];
+  if (!value) {
     return;
   }
-  let url = formData.value[field].trim();
+  if (typeof value !== "string") {
+    return;
+  }
+  let url = value.trim();
   // 通用规则：先去掉尾部多余斜杠
   url = url.replace(/\/+$/, "");
   formData.value[field] = url;
 };
 
 const formatBucketName = () => {
-  if (formData.value.bucket_name) {
+  if (typeof formData.value.bucket_name === "string") {
     // 只去除空格
     formData.value.bucket_name = formData.value.bucket_name.trim();
   }
@@ -139,16 +127,98 @@ const getFieldMeta = (fieldName) => {
   return schema.fields.find((f) => f.name === fieldName) || null;
 };
 
+// 统一条件表达
+const matchSchemaCondition = (condition) => {
+  if (!condition || typeof condition !== "object") return false;
+  const fieldName = condition.field;
+  if (typeof fieldName !== "string" || !fieldName) return false;
+
+  const currentValue = formData.value[fieldName];
+
+  // 兼容两种写法：equals / value
+  if (Object.prototype.hasOwnProperty.call(condition, "equals")) {
+    return currentValue === condition.equals;
+  }
+  if (Object.prototype.hasOwnProperty.call(condition, "value")) {
+    return currentValue === condition.value;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(condition, "notEquals")) {
+    return currentValue !== condition.notEquals;
+  }
+
+  if (Array.isArray(condition.values)) {
+    return condition.values.includes(currentValue);
+  }
+
+  if (condition.truthy === true) {
+    return !!currentValue;
+  }
+  if (condition.falsy === true) {
+    return !currentValue;
+  }
+
+  return false;
+};
+
 const shouldRenderField = (fieldName) => {
   if (FIELDS_HANDLED_EXTERNALLY.has(fieldName)) return false;
-  return !!getFieldMeta(fieldName);
+  const meta = getFieldMeta(fieldName);
+  if (!meta) return false;
+
+  const dependsOn = meta?.ui?.dependsOn;
+  if (dependsOn && typeof dependsOn === "object") {
+    const depField = dependsOn.field;
+    if (typeof depField === "string" && depField) {
+      const currentValue = formData.value[depField];
+      if (Object.prototype.hasOwnProperty.call(dependsOn, "value")) {
+        return currentValue === dependsOn.value;
+      }
+      if (Array.isArray(dependsOn.values)) {
+        return dependsOn.values.includes(currentValue);
+      }
+      if (dependsOn.truthy === true) {
+        return !!currentValue;
+      }
+    }
+  }
+
+  return true;
 };
 
 /**
  * 判断字段是否应该被禁用
- * - 具体规则由 per-type 行为配置决定（如 OneDrive token_renew_endpoint）
+ * - 统一使用后端 schema 的 ui.disabledWhen 描述
  */
-const isFieldDisabled = (fieldName) => behaviorIsFieldDisabled(fieldName);
+const isFieldDisabled = (fieldName) => {
+  const meta = getFieldMeta(fieldName);
+  const disabledWhen = meta?.ui?.disabledWhen;
+  if (disabledWhen && typeof disabledWhen === "object") {
+    return matchSchemaCondition(disabledWhen);
+  }
+  return false;
+};
+
+// ===== secret 字段 =====
+const secretVisibleByField = reactive({});
+const secretsLoaded = ref(false);
+const secretsRevealing = ref(false);
+
+const getSecretFieldNames = () => {
+  const schema = currentConfigSchema.value;
+  if (!schema?.fields) return [];
+  return schema.fields
+    .filter((f) => f && typeof f === "object" && f.type === "secret" && typeof f.name === "string" && f.name)
+    .map((f) => f.name);
+};
+
+const resetSecretUiState = () => {
+  for (const key of Object.keys(secretVisibleByField)) {
+    delete secretVisibleByField[key];
+  }
+  secretsLoaded.value = false;
+  secretsRevealing.value = false;
+};
 
 /**
  * 获取组内的布局行（支持新格式）
@@ -180,6 +250,45 @@ const getLayoutRowsForGroup = (group) => {
 const getFieldType = (fieldName) => {
   const meta = getFieldMeta(fieldName);
   return meta?.type || "string";
+};
+
+const isSecretField = (fieldName) => getFieldType(fieldName) === "secret";
+const isSecretVisible = (fieldName) => !!secretVisibleByField[fieldName];
+const isSecretRevealing = (_fieldName) => secretsRevealing.value;
+const getSecretInputType = (fieldName) => (isSecretVisible(fieldName) ? "text" : "password");
+
+const handleSecretToggle = async (fieldName) => {
+  if (!isSecretField(fieldName)) return;
+
+  const nextVisible = !isSecretVisible(fieldName);
+
+  // 新建时：只做前端可见性切换，不请求 reveal
+  if (!props.isEdit || !configIdRef.value) {
+    secretVisibleByField[fieldName] = nextVisible;
+    return;
+  }
+
+  // 编辑时：首次展开任意一个 secret 字段时，拉一次 plain，把所有 secret 字段一起填充
+  if (nextVisible && !secretsLoaded.value && !secretsRevealing.value) {
+    secretsRevealing.value = true;
+    try {
+      const resp = await getStorageConfigReveal(configIdRef.value, "plain");
+      const data = resp?.data || resp || {};
+
+      const secretFields = getSecretFieldNames();
+      for (const key of secretFields) {
+        formData.value[key] = data[key] || "";
+      }
+
+      secretsLoaded.value = true;
+    } catch (e) {
+      error.value = e?.message || "获取存储密钥失败";
+    } finally {
+      secretsRevealing.value = false;
+    }
+  }
+
+  secretVisibleByField[fieldName] = nextVisible;
 };
 
 const getFieldLabel = (fieldName) => {
@@ -239,6 +348,41 @@ const getEnumOptions = (fieldName) => {
   return [];
 };
 
+const isEnumToggle = (fieldName) => {
+  const meta = getFieldMeta(fieldName);
+  if (meta?.type !== "enum") return false;
+  if (meta?.ui?.renderAs !== "toggle") return false;
+  const opts = getEnumOptions(fieldName);
+  return Array.isArray(opts) && opts.length === 2;
+};
+
+const getEnumToggleValues = (fieldName) => {
+  const opts = getEnumOptions(fieldName);
+  const values = (opts || []).map((o) => o?.value).filter(Boolean);
+  // 优先识别 Telegram 的常用值，避免依赖 options 顺序
+  const onValue = values.includes("self_hosted") ? "self_hosted" : values[1];
+  const offValue = values.includes("official") ? "official" : values[0];
+  return { onValue, offValue };
+};
+
+const getEnumToggleLabel = (fieldName) => {
+  const meta = getFieldMeta(fieldName);
+  if (meta?.ui?.toggleLabelKey) {
+    return t(meta.ui.toggleLabelKey);
+  }
+
+  const { onValue } = getEnumToggleValues(fieldName);
+  const opts = getEnumOptions(fieldName) || [];
+  const onOpt = opts.find((o) => o?.value === onValue) || null;
+  if (onOpt?.labelKey) return t(onOpt.labelKey);
+  return onOpt?.label || String(onValue || "");
+};
+
+const handleEnumToggleChange = (fieldName, checked) => {
+  const { onValue, offValue } = getEnumToggleValues(fieldName);
+  formData.value[fieldName] = checked ? onValue : offValue;
+};
+
 const isUrlField = (fieldName) => {
   const meta = getFieldMeta(fieldName);
   return meta?.validation?.rule === "url";
@@ -252,7 +396,25 @@ const isAbsPathField = (fieldName) => {
 const isFieldRequiredOnCreate = (fieldName) => {
   const meta = getFieldMeta(fieldName);
   if (!meta) return false;
-  return behaviorIsFieldRequiredOnCreate(fieldName, meta);
+
+  // 条件必填：requiredWhen 命中时，视为必填
+  const requiredWhen = meta?.requiredWhen;
+  if (requiredWhen && typeof requiredWhen === "object") {
+    if (matchSchemaCondition(requiredWhen)) {
+      return true;
+    }
+  }
+
+  // 编辑
+  if (props.isEdit) {
+    return !!meta.required;
+  }
+
+  // 新建
+  if (meta.requiredOnCreate === true) {
+    return true;
+  }
+  return !!meta.required;
 };
 
 /**
@@ -284,6 +446,20 @@ const normalizeFormBooleans = (schema = currentConfigSchema.value) => {
   }
 };
 
+// 基于 schema.defaultValue 填充默认值
+// 只在当前字段为空（undefined/null/空字符串）时写入，避免覆盖用户输入或编辑态数据
+const applySchemaDefaultValues = (schema = currentConfigSchema.value) => {
+  if (!schema?.fields) return;
+  for (const field of schema.fields) {
+    const key = field?.name;
+    if (!key) continue;
+    const current = formData.value[key];
+    if ((current === undefined || current === null || current === "") && field.defaultValue !== undefined) {
+      formData.value[key] = field.defaultValue;
+    }
+  }
+};
+
 // 字段级 blur 处理：复用已有工具逻辑
 const handleFieldBlur = (fieldName) => {
   if (fieldName === "name") {
@@ -296,8 +472,6 @@ const handleFieldBlur = (fieldName) => {
   }
   if (fieldName === "endpoint_url") {
     formatUrl("endpoint_url");
-    // 针对具体类型的额外格式化逻辑（如 WebDAV endpoint 末尾追加斜杠）
-    formatFieldOnBlur("endpoint_url");
     return;
   }
   if (isUrlField(fieldName)) {
@@ -315,7 +489,7 @@ const buildPayload = () => {
   };
 
   // 容量限制不在 schema 中，单独处理
-  if (formData.value.total_storage_bytes != null) {
+  if (formData.value.total_storage_bytes !== undefined) {
     base.total_storage_bytes = formData.value.total_storage_bytes;
   }
 
@@ -386,6 +560,69 @@ const formValid = computed(() => {
   return true;
 });
 
+// 照顾当前已有的 S3/MIRROR 体验。
+const ensureTypeDefaults = () => {
+  const type = currentType.value;
+
+  if (type === "S3") {
+    const providerType = formData.value.provider_type;
+    if (!providerType) return;
+    if (formData.value.endpoint_url) return;
+
+    switch (providerType) {
+      case "Cloudflare R2":
+        formData.value.endpoint_url = "https://<accountid>.r2.cloudflarestorage.com";
+        formData.value.region = "auto";
+        formData.value.path_style = false;
+        break;
+      case "Backblaze B2":
+        formData.value.endpoint_url = "https://s3.us-west-000.backblazeb2.com";
+        formData.value.region = "";
+        formData.value.path_style = true;
+        break;
+      case "AWS S3":
+        formData.value.endpoint_url = "https://s3.amazonaws.com";
+        formData.value.path_style = false;
+        break;
+      case "Aliyun OSS":
+        formData.value.endpoint_url = "https://oss-cn-hangzhou.aliyuncs.com";
+        formData.value.region = "oss-cn-hangzhou";
+        formData.value.path_style = false;
+        break;
+      default:
+        formData.value.endpoint_url = "https://your-s3-endpoint.com";
+        formData.value.path_style = false;
+        break;
+    }
+  }
+
+  if (type === "MIRROR") {
+    const preset = formData.value.preset;
+    if (!preset) return;
+    const currentEndpoint = (formData.value.endpoint_url || "").trim();
+
+    const defaultsByPreset = {
+      tuna: "https://mirrors.tuna.tsinghua.edu.cn/",
+      ustc: "https://mirrors.ustc.edu.cn/",
+      aliyun: "https://mirrors.aliyun.com/",
+    };
+
+    const key = String(preset).trim().toLowerCase();
+    const nextDefault = defaultsByPreset[key] || "";
+    if (!nextDefault) return;
+
+    if (!currentEndpoint) {
+      formData.value.endpoint_url = nextDefault;
+      return;
+    }
+
+    const knownDefaults = new Set(Object.values(defaultsByPreset));
+    if (knownDefaults.has(currentEndpoint)) {
+      formData.value.endpoint_url = nextDefault;
+    }
+  }
+};
+
 // 监听提供商变化（S3 默认 endpoint 由 per-type 行为配置填充）
 watch(
   () => formData.value.provider_type,
@@ -394,10 +631,29 @@ watch(
   },
 );
 
+// 监听 MIRROR preset 变化（选择模板后自动回填 endpoint_url）
+watch(
+  () => [formData.value.storage_type, formData.value.preset],
+  ([type]) => {
+    if (type === "MIRROR") {
+      ensureTypeDefaults();
+    }
+  },
+);
+
+// 切换存储类型时，secret 可见性与 reveal 状态必须重置（避免“上一个类型的密钥状态串到下一个类型”）
+watch(
+  () => currentType.value,
+  () => {
+    resetSecretUiState();
+  },
+);
+
 // 监听编辑的配置变化
 watch(
   () => props.config,
   () => {
+    resetSecretUiState();
     const config = props.config;
     if (config) {
       const type = config.storage_type || (storageTypes.value[0]?.value || "");
@@ -464,7 +720,9 @@ watch(
   () => currentConfigSchema.value,
   (schema) => {
     if (!schema) return;
+    applySchemaDefaultValues(schema);
     normalizeFormBooleans(schema);
+    ensureTypeDefaults();
   },
 );
 
@@ -479,33 +737,24 @@ const submitForm = async () => {
     if (props.isEdit && props.config?.id) {
       const updateData = { ...buildPayload() };
 
-      // S3 密钥字段：空值或掩码值不提交（保留原值）
-      if (!updateData.access_key_id || updateData.access_key_id.trim() === "" || isMaskedValue(updateData.access_key_id)) {
-        delete updateData.access_key_id;
-      }
+      // 通用规则：所有 secret 字段（按后端 schema 定义）在编辑时都遵循：
+      // - 空值：不提交（保留原值）
+      // - masked 占位符（*****1234）：不提交（保留原值）
+      const schema = currentConfigSchema.value;
+      const secretFields = Array.isArray(schema?.fields)
+        ? schema.fields
+            .filter((f) => f && typeof f === "object" && f.type === "secret" && typeof f.name === "string" && f.name)
+            .map((f) => f.name)
+        : [];
 
-      if (!updateData.secret_access_key || updateData.secret_access_key.trim() === "" || isMaskedValue(updateData.secret_access_key)) {
-        delete updateData.secret_access_key;
-      }
-
-      // WebDAV 密码字段：空值或掩码值不提交（保留原值）
-      if (isWebDavType.value && (!updateData.password || updateData.password.trim() === "" || isMaskedValue(updateData.password))) {
-        delete updateData.password;
-      }
-
-      // OneDrive / GoogleDrive 密钥字段：空值或掩码值不提交（保留原值）
-      if (
-        (isOneDriveType.value || isGoogleDriveType.value) &&
-        (!updateData.client_secret || updateData.client_secret.trim() === "" || isMaskedValue(updateData.client_secret))
-      ) {
-        delete updateData.client_secret;
-      }
-
-      if (
-        (isOneDriveType.value || isGoogleDriveType.value) &&
-        (!updateData.refresh_token || updateData.refresh_token.trim() === "" || isMaskedValue(updateData.refresh_token))
-      ) {
-        delete updateData.refresh_token;
+      for (const fieldName of secretFields) {
+        if (!Object.prototype.hasOwnProperty.call(updateData, fieldName)) continue;
+        const raw = updateData[fieldName];
+        const str = typeof raw === "string" ? raw.trim() : "";
+        const shouldSkip = raw === null || raw === undefined || str.length === 0 || isMaskedValue(str);
+        if (shouldSkip) {
+          delete updateData[fieldName];
+        }
       }
 
       savedConfig = await updateStorageConfig(props.config.id, updateData);
@@ -532,7 +781,7 @@ const submitForm = async () => {
       emit("close");
     }, 1000);
   } catch (err) {
-    console.error("存储配置操作失败:", err);
+    log.error("存储配置操作失败:", err);
     error.value = err.message || "操作失败，请重试";
   } finally {
     loading.value = false;
@@ -547,25 +796,15 @@ const closeModal = () => {
 // 初始化：加载存储类型元数据
 onMounted(async () => {
   try {
-    const resp = await api.mount.getStorageTypes();
-    storageTypesMeta.value = Array.isArray(resp?.data) ? resp.data : Array.isArray(resp) ? resp : [];
+    await storageConfigsStore.loadStorageTypes();
     if (!formData.value.storage_type && storageTypes.value.length > 0) {
       formData.value.storage_type = storageTypes.value[0].value;
     }
     // schema 默认值填充
-    const schema = currentConfigSchema.value;
-    if (schema?.fields) {
-      for (const field of schema.fields) {
-        const key = field.name;
-        const current = formData.value[key];
-        if ((current === undefined || current === null || current === "") && field.defaultValue !== undefined) {
-          formData.value[key] = field.defaultValue;
-        }
-      }
-    }
+    applySchemaDefaultValues(currentConfigSchema.value);
     normalizeFormBooleans();
   } catch (e) {
-    console.error("加载存储类型元数据失败:", e);
+    log.error("加载存储类型元数据失败:", e);
   }
 });
 </script>
@@ -649,7 +888,7 @@ onMounted(async () => {
                 </select>
               </div>
               <p class="mt-1 text-xs" :class="darkMode ? 'text-gray-400' : 'text-gray-500'">
-                {{ formData.provider_type === "Cloudflare R2" || formData.provider_type === "Backblaze B2" ? "建议默认 10GB" : "建议默认 5GB" }}
+                用于限制该存储的最大可用容量（默认 10GB，清空=不限额）
               </p>
             </div>
 
@@ -700,7 +939,25 @@ onMounted(async () => {
                           {{ getFieldLabel(fieldName) }}
                           <span v-if="isFieldRequiredOnCreate(fieldName)" class="text-red-500">*</span>
                         </label>
+                        <div
+                          v-if="isEnumToggle(fieldName)"
+                          class="flex items-center h-10 px-3 py-2 rounded-md border"
+                          :class="darkMode ? 'border-gray-600' : 'border-gray-300'"
+                        >
+                          <input
+                            type="checkbox"
+                            :id="fieldName"
+                            :checked="formData[fieldName] === getEnumToggleValues(fieldName).onValue"
+                            @change="handleEnumToggleChange(fieldName, $event.target.checked)"
+                            class="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                            :class="darkMode ? 'bg-gray-700 border-gray-600' : ''"
+                          />
+                          <label :for="fieldName" class="ml-2 text-sm" :class="darkMode ? 'text-gray-200' : 'text-gray-700'">
+                            {{ getEnumToggleLabel(fieldName) }}
+                          </label>
+                        </div>
                         <select
+                          v-else
                           :id="fieldName"
                           v-model="formData[fieldName]"
                           class="block w-full px-3 py-2 rounded-md text-sm transition-colors duration-200 border"
@@ -816,7 +1073,25 @@ onMounted(async () => {
                         {{ getFieldLabel(row.field) }}
                         <span v-if="isFieldRequiredOnCreate(row.field)" class="text-red-500">*</span>
                       </label>
+                      <div
+                        v-if="isEnumToggle(row.field)"
+                        class="flex items-center h-10 px-3 py-2 rounded-md border"
+                        :class="darkMode ? 'border-gray-600' : 'border-gray-300'"
+                      >
+                        <input
+                          type="checkbox"
+                          :id="row.field"
+                          :checked="formData[row.field] === getEnumToggleValues(row.field).onValue"
+                          @change="handleEnumToggleChange(row.field, $event.target.checked)"
+                          class="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                          :class="darkMode ? 'bg-gray-700 border-gray-600' : ''"
+                        />
+                        <label :for="row.field" class="ml-2 text-sm" :class="darkMode ? 'text-gray-200' : 'text-gray-700'">
+                          {{ getEnumToggleLabel(row.field) }}
+                        </label>
+                      </div>
                       <select
+                        v-else
                         :id="row.field"
                         v-model="formData[row.field]"
                         class="block w-full px-3 py-2 rounded-md text-sm transition-colors duration-200 border"

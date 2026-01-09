@@ -22,6 +22,16 @@ export async function getDirectoryList(path, options = {}) {
   if (options.refresh) {
     params.refresh = "true";
   }
+  if (options.cursor) {
+    params.cursor = String(options.cursor);
+  }
+  if (options.limit) {
+    params.limit = String(options.limit);
+  }
+  // 允许前端显式指定是否启用分页模式
+  if (options.paged) {
+    params.paged = "true";
+  }
   const requestOptions = { params };
   if (options.headers) {
     requestOptions.headers = options.headers;
@@ -224,8 +234,10 @@ export async function verifyPathPassword(path, password) {
  * @param {number} partSize 分片大小（默认5MB）
  * @returns {Promise<Object>} 初始化结果响应对象
  */
-export async function initMultipartUpload(path, fileName, fileSize, contentType, partSize = 5 * 1024 * 1024) {
+export async function initMultipartUpload(path, fileName, fileSize, contentType, partSize = 5 * 1024 * 1024, extra = {}) {
   const partCount = Math.ceil(fileSize / partSize);
+
+  const sha256 = extra?.sha256 || extra?.oid || null;
 
   return post(`/fs/multipart/init`, {
     path,
@@ -233,6 +245,8 @@ export async function initMultipartUpload(path, fileName, fileSize, contentType,
     fileSize,
     partSize,
     partCount,
+    ...(contentType ? { contentType } : {}),
+    ...(sha256 ? { sha256 } : {}),
   });
 }
 
@@ -289,14 +303,14 @@ export async function listMultipartParts(path, uploadId, fileName) {
 }
 
 /**
- * 为现有上传刷新预签名URL
+ * 获取/刷新分片上传参数（统一入口）
  * @param {string} path 文件路径
  * @param {string} uploadId 现有的上传ID
- * @param {Array} partNumbers 需要刷新URL的分片编号数组
- * @returns {Promise<Object>} 刷新的预签名URL列表响应对象
+ * @param {Array} partNumbers 需要签名的分片编号数组：
+ * @returns {Promise<Object>} 分片上传参数响应对象
  */
-export async function refreshMultipartUrls(path, uploadId, partNumbers) {
-  return post(`/fs/multipart/refresh-urls`, { path, uploadId, partNumbers });
+export async function signMultipartParts(path, uploadId, partNumbers) {
+  return post(`/fs/multipart/sign-parts`, { path, uploadId, partNumbers });
 }
 
 /******************************************************************************
@@ -309,14 +323,16 @@ export async function refreshMultipartUrls(path, uploadId, partNumbers) {
  * @param {string} fileName 文件名
  * @param {string} contentType 文件类型
  * @param {number} fileSize 文件大小
+ * @param {string} [sha256] 文件 SHA-256（hex）。
  * @returns {Promise<Object>} 预签名URL响应对象
  */
-export async function getPresignedUploadUrl(path, fileName, contentType, fileSize) {
+export async function getPresignedUploadUrl(path, fileName, contentType, fileSize, sha256 = null) {
   return post(`/fs/presign`, {
     path,
     fileName,
     contentType,
     fileSize,
+    sha256,
   });
 }
 
@@ -400,7 +416,7 @@ export async function uploadWithPresignedUrl(url, data, contentType, onProgress,
 
     xhr.onload = function () {
       if (cancelChecker) {
-        clearInterval(cancelChecker);
+        clearTimeout(cancelChecker);
       }
 
       if (xhr.status === 200) {
@@ -416,14 +432,14 @@ export async function uploadWithPresignedUrl(url, data, contentType, onProgress,
 
     xhr.onerror = function () {
       if (cancelChecker) {
-        clearInterval(cancelChecker);
+        clearTimeout(cancelChecker);
       }
       reject(new Error("上传过程中发生网络错误"));
     };
 
     xhr.onabort = function () {
       if (cancelChecker) {
-        clearInterval(cancelChecker);
+        clearTimeout(cancelChecker);
       }
       reject(new Error("上传已取消"));
     };
@@ -431,14 +447,18 @@ export async function uploadWithPresignedUrl(url, data, contentType, onProgress,
     // 定期检查取消状态
     let cancelChecker = null;
     if (onCancel) {
-      cancelChecker = setInterval(() => {
+      const checkCancel = () => {
         if (onCancel()) {
           if (cancelChecker) {
-            clearInterval(cancelChecker);
+            clearTimeout(cancelChecker);
+            cancelChecker = null;
           }
           xhr.abort();
+          return;
         }
-      }, 100);
+        cancelChecker = setTimeout(checkCancel, 100);
+      };
+      cancelChecker = setTimeout(checkCancel, 100);
     }
 
     // 开始上传

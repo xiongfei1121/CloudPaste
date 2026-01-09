@@ -131,10 +131,12 @@
   import { useConfirmDialog } from "@/composables/core/useConfirmDialog.js";
   import ConfirmDialog from "@/components/common/dialogs/ConfirmDialog.vue";
   import { IconClose, IconExclamation, IconHome, IconInformationCircle, IconRefresh } from "@/components/icons";
+  import { createLogger } from "@/utils/logger.js";
 
   const { t } = useI18n();
   const fsApi = useFsService();
   const { showError } = useGlobalMessage();
+  const log = createLogger("CopyModal");
 
 // 确认对话框
 const { dialogState, confirm, handleConfirm, handleCancel } = useConfirmDialog();
@@ -176,6 +178,29 @@ const DirectoryItemVue = {
     const children = shallowRef([]);
     const loading = ref(false);
 
+    // 加载子目录
+    const loadChildren = async () => {
+      const cacheKey = props.item.path;
+      if (directoryCache.value.has(cacheKey)) {
+        children.value = directoryCache.value.get(cacheKey);
+        return;
+      }
+
+      loading.value = true;
+      try {
+        const data = await props.fsApi.getDirectoryList(props.item.path);
+        const items = Array.isArray(data?.items) ? data.items : [];
+        const dirItems = items.filter((item) => item && item.isDirectory);
+
+        children.value = dirItems;
+        directoryCache.value.set(cacheKey, dirItems);
+      } catch (error) {
+        children.value = [];
+      } finally {
+        loading.value = false;
+      }
+    };
+
     // 监听当前路径变化
     watch(
       () => props.currentPath,
@@ -208,29 +233,6 @@ const DirectoryItemVue = {
       expanded.value = true;
       if (children.value.length === 0) {
         loadChildren();
-      }
-    };
-
-    // 加载子目录
-    const loadChildren = async () => {
-      const cacheKey = props.item.path;
-      if (directoryCache.value.has(cacheKey)) {
-        children.value = directoryCache.value.get(cacheKey);
-        return;
-      }
-
-      loading.value = true;
-      try {
-        const data = await props.fsApi.getDirectoryList(props.item.path);
-        const items = Array.isArray(data?.items) ? data.items : [];
-        const dirItems = items.filter((item) => item && item.isDirectory);
-
-        children.value = dirItems;
-        directoryCache.value.set(cacheKey, dirItems);
-      } catch (error) {
-        children.value = [];
-      } finally {
-        loading.value = false;
       }
     };
 
@@ -464,27 +466,6 @@ const clearDirectoryCache = () => {
   directoryCache.value.clear();
 };
 
-// 监听模态窗口打开状态
-watch(
-  () => props.isOpen,
-  (newValue) => {
-    if (newValue) {
-      // 当模态窗口打开时，设置初始路径为用户的基本路径
-      currentPath.value = userBasicPath.value;
-      loadRootDirectories();
-    } else {
-      // 当模态窗口关闭时，清除目录缓存
-      clearDirectoryCache();
-    }
-  }
-);
-
-// 关闭模态窗口
-const closeModal = () => {
-  if (copying.value) return; // 如果正在复制，不允许关闭
-  emit("close");
-};
-
 // 加载根目录内容
 const loadRootDirectories = async () => {
   const rootPath = userBasicPath.value;
@@ -508,6 +489,29 @@ const loadRootDirectories = async () => {
   } finally {
     loading.value = false;
   }
+};
+
+// 监听模态窗口打开状态
+watch(
+  () => props.isOpen,
+  (newValue) => {
+    if (newValue) {
+      // 当模态窗口打开时，设置初始路径为用户的基本路径
+      currentPath.value = userBasicPath.value;
+      loadRootDirectories();
+    } else {
+      // 当模态窗口关闭时，清除目录缓存
+      clearDirectoryCache();
+    }
+  },
+  // 关键：当 CopyModal 组件“首次挂载时就已经是打开状态”（例如异步加载 + 首次打开才渲染）也要立刻初始化
+  { immediate: true }
+);
+
+// 关闭模态窗口
+const closeModal = () => {
+  if (copying.value) return; // 如果正在复制，不允许关闭
+  emit("close");
 };
 
 // 选择目标位置
@@ -633,8 +637,6 @@ const confirmCopy = async () => {
     // ========== 统一任务模式 ==========
     // 所有复制操作统一走任务系统，无条件分支
     // 复制策略（同存储/跨存储/S3优化）由后端 CopyTaskHandler 内部决策
-    console.log(`[CopyModal] 创建复制任务，共 ${copyItems.length} 项`);
-
     // 调用后端 batch-copy API（现在始终返回 jobId）
     const response = await fsApi.batchCopyItems(copyItems, {
       skipExisting: skipExisting.value,
@@ -645,7 +647,6 @@ const confirmCopy = async () => {
     }
 
     const jobId = response.data.jobId;
-    console.log(`[CopyModal] 作业已创建，jobId: ${jobId}`);
 
     // 创建前端任务追踪，并在 details 中记录 jobId
     const { taskManager, taskId } = createCopyTask(props.selectedItems.length, jobId);
@@ -668,7 +669,7 @@ const confirmCopy = async () => {
   } catch (error) {
     // 如果 API 请求失败，保持模态框打开并显示错误
     // 注意：此时尚未创建前端任务，无需标记任何任务为失败
-    console.error('[CopyModal] 复制启动失败:', error);
+    log.error("[CopyModal] 复制启动失败:", error);
     showError(error.message || t('mount.copyModal.copyFailed'));
     copying.value = false;
   }

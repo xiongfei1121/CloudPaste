@@ -19,10 +19,13 @@ DROP TABLE IF EXISTS schema_migrations;
 DROP TABLE IF EXISTS scheduled_jobs;
 DROP TABLE IF EXISTS upload_sessions;
 DROP TABLE IF EXISTS scheduled_job_runs;
+DROP TABLE IF EXISTS vfs_nodes;
+DROP TABLE IF EXISTS upload_parts;
 DROP TABLE IF EXISTS fs_search_index_entries;
 DROP TABLE IF EXISTS fs_search_index_state;
 DROP TABLE IF EXISTS fs_search_index_dirty;
 DROP TABLE IF EXISTS fs_search_index_fts;
+DROP TABLE IF EXISTS metrics_cache;
 
 -- 创建pastes表 - 存储文本分享数据
 CREATE TABLE pastes (
@@ -356,7 +359,7 @@ CREATE TABLE upload_sessions (
   provider_meta TEXT,                    -- JSON 扩展字段（驱动私有）
 
   -- 会话状态与错误
-  status TEXT NOT NULL,                  -- active / completed / aborted / expired / error
+  status TEXT NOT NULL,                  -- initiated / uploading / completed / aborted / expired / error
   error_code TEXT,
   error_message TEXT,
 
@@ -372,6 +375,82 @@ CREATE INDEX idx_upload_sessions_mount_path ON upload_sessions(mount_id, fs_path
 CREATE INDEX idx_upload_sessions_status ON upload_sessions(status, updated_at DESC);
 CREATE INDEX idx_upload_sessions_source ON upload_sessions(source);
 CREATE INDEX idx_upload_sessions_fingerprint ON upload_sessions(fingerprint_value);
+
+-- ================================
+-- VFS 索引（长期数据）
+-- - 用于让“无目录树”的内容后端也能在 FS UI 里展示为目录树
+-- - root 约定：root 本身不占记录；root 下子节点使用 parent_id = ''（空字符串）
+-- ================================
+
+CREATE TABLE vfs_nodes (
+  id TEXT PRIMARY KEY,                   -- 唯一标识（例如 vfs_xxx）
+
+  -- 多用户隔离预留
+  owner_type TEXT NOT NULL,              -- admin / apikey / user（预留）
+  owner_id TEXT NOT NULL,                -- 具体主体 id（字符串）
+
+  -- 归属作用域（用于“无目录树后端”的虚拟目录树真相）
+  scope_type TEXT NOT NULL,              -- mount | storage_config
+  scope_id TEXT NOT NULL,                -- storage_mounts.id / storage_configs.id
+
+  -- 目录树结构
+  parent_id TEXT NOT NULL DEFAULT '',    -- root 下子节点：''；非 root：父节点 id
+  name TEXT NOT NULL,                    -- 节点名（文件名/文件夹名）
+  node_type TEXT NOT NULL,               -- dir | file | link
+
+  -- 展示/元信息
+  mime_type TEXT,
+  size INTEGER,
+  hash_algo TEXT,
+  hash_value TEXT,
+  status TEXT NOT NULL DEFAULT 'active', -- active | deleted（软删除预留）
+
+  -- 内容后端定位
+  storage_type TEXT NOT NULL,            -- 内容后端类型（TELEGRAM / URL / S3 ...）
+  content_ref TEXT,                      -- JSON：描述如何获取内容（TG manifest / URL 等）
+
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+  UNIQUE (owner_type, owner_id, scope_type, scope_id, parent_id, name)
+);
+
+CREATE INDEX idx_vfs_nodes_scope ON vfs_nodes(owner_type, owner_id, scope_type, scope_id, parent_id);
+CREATE INDEX idx_vfs_nodes_scope_id ON vfs_nodes(scope_type, scope_id);
+
+-- ================================
+-- 分片上传明细（临时数据：complete 后删除）
+-- - 一片一行，避免并发写入互相覆盖
+-- ================================
+
+CREATE TABLE upload_parts (
+  id TEXT PRIMARY KEY,                   -- 唯一标识（例如 uplp_xxx）
+  upload_id TEXT NOT NULL,               -- upload_sessions.id
+  part_no INTEGER NOT NULL,              -- 分片编号（从 1 开始）
+
+  byte_start INTEGER,                    -- 可选：该片在整文件中的起始偏移
+  byte_end INTEGER,                      -- 可选：该片在整文件中的结束偏移（包含）
+  size INTEGER NOT NULL,                 -- 分片大小（字节）
+
+  checksum_algo TEXT,
+  checksum TEXT,
+
+  storage_type TEXT NOT NULL,            -- 内容后端类型（TELEGRAM / URL / ...）
+  provider_part_id TEXT,                 -- 可选：回执 id（如 ETag / messageId / fileId）
+  provider_meta TEXT,                    -- JSON：回执扩展字段（如 TG messageId/fileId/channelId）
+
+  status TEXT NOT NULL DEFAULT 'uploaded', -- uploaded | error
+  error_code TEXT,
+  error_message TEXT,
+
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+  UNIQUE (upload_id, part_no)
+);
+
+CREATE INDEX idx_upload_parts_upload_part_no ON upload_parts(upload_id, part_no);
+CREATE INDEX idx_upload_parts_updated_at ON upload_parts(updated_at);
 
 
 CREATE TABLE tasks (
@@ -463,3 +542,24 @@ CREATE TABLE scheduled_job_runs (
 
 CREATE INDEX idx_scheduled_job_runs_task_started
   ON scheduled_job_runs (task_id, started_at DESC);
+
+-- 通用指标缓存表：存储各种统计指标的缓存数据
+CREATE TABLE metrics_cache (
+  scope_type TEXT NOT NULL,              -- 作用域类型，如 'global'、'storage'、'user' 等
+  scope_id TEXT NOT NULL,                -- 作用域标识，如具体的存储ID或用户ID
+  metric_key TEXT NOT NULL,              -- 指标键名
+
+  value_num INTEGER,                     -- 数值类型的指标值
+  value_text TEXT,                       -- 文本类型的指标值
+  value_json_text TEXT,                  -- JSON格式的复杂指标值
+
+  snapshot_at_ms INTEGER,                -- 快照时间戳（毫秒）
+  updated_at_ms INTEGER NOT NULL,        -- 最后更新时间戳（毫秒）
+
+  error_message TEXT,                    -- 错误信息（如果指标计算失败）
+
+  PRIMARY KEY (scope_type, scope_id, metric_key)
+);
+
+-- 通用指标缓存索引：按作用域类型和ID查询
+CREATE INDEX idx_metrics_cache_scope ON metrics_cache(scope_type, scope_id);

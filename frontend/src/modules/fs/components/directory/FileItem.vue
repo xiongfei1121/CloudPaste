@@ -31,12 +31,25 @@
       <div 
         class="file-item__name" 
         :class="[
-          darkMode ? 'text-gray-200' : 'text-gray-700',
-          `file-item__name--${fileNameOverflow}`
+          darkMode ? 'text-gray-200' : 'text-gray-700'
         ]"
         :title="fileNameOverflow === 'ellipsis' ? item.name : undefined"
       >
-        {{ item.name }}
+        <span
+          class="file-item__name-text"
+          :class="`file-item__name--${fileNameOverflow}`"
+          :data-name="item.name"
+        >
+          {{ item.name }}
+        </span>
+        <span
+          v-if="storageBackendBadge"
+          class="file-item__backend-badge"
+          :class="storageBackendBadgeClass"
+          :title="storageBackendBadgeTitle"
+        >
+          {{ storageBackendBadge }}
+        </span>
       </div>
       <!-- 移动端文件大小显示 -->
       <div class="file-item__size-mobile" :class="darkMode ? 'text-gray-400' : 'text-gray-500'">
@@ -73,8 +86,7 @@
         <button
           v-if="!item.isDirectory"
           @click.stop="$emit('download', item)"
-          class="file-item__action-btn"
-          :class="darkMode ? 'file-item__action-btn--download-dark' : 'file-item__action-btn--download-light'"
+          class="file-item__action-btn w-8 h-8 rounded-full flex items-center justify-center transition-all bg-transparent text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 transform hover:scale-110"
           :title="t('mount.fileItem.download')"
         >
           <IconDownload class="w-4 h-4 sm:w-5 sm:h-5" aria-hidden="true" />
@@ -84,8 +96,7 @@
         <button
           v-if="!item.isDirectory"
           @click.stop="$emit('getLink', item)"
-          class="file-item__action-btn"
-          :class="darkMode ? 'file-item__action-btn--link-dark' : 'file-item__action-btn--link-light'"
+          class="file-item__action-btn w-8 h-8 rounded-full flex items-center justify-center transition-all bg-transparent text-green-600 hover:text-green-700 dark:text-green-400 dark:hover:text-green-300 transform hover:scale-110"
           :title="t('mount.fileItem.getLink')"
         >
           <IconLink class="w-4 h-4 sm:w-5 sm:h-5" aria-hidden="true" />
@@ -95,8 +106,7 @@
         <button
           v-if="!item.isDirectory"
           @click.stop="$emit('rename', item)"
-          class="file-item__action-btn"
-          :class="darkMode ? 'file-item__action-btn--rename-dark' : 'file-item__action-btn--rename-light'"
+          class="file-item__action-btn w-8 h-8 rounded-full flex items-center justify-center transition-all bg-transparent text-amber-600 hover:text-amber-700 dark:text-amber-400 dark:hover:text-amber-300 transform hover:scale-110"
           :title="t('mount.fileItem.rename')"
         >
           <IconRename class="w-4 h-4 sm:w-5 sm:h-5" aria-hidden="true" />
@@ -105,8 +115,7 @@
         <!-- 删除按钮 -->
         <button
           @click.stop="$emit('delete', item)"
-          class="file-item__action-btn"
-          :class="darkMode ? 'file-item__action-btn--delete-dark' : 'file-item__action-btn--delete-light'"
+          class="file-item__action-btn w-8 h-8 rounded-full flex items-center justify-center transition-all bg-transparent text-red-600 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300 transform hover:scale-110"
           :title="t('mount.fileItem.delete')"
         >
           <IconDelete class="w-4 h-4 sm:w-5 sm:h-5" aria-hidden="true" />
@@ -222,11 +231,33 @@ const modifiedTitle = computed(() => {
   if (props.item?.modified_source === "compute") return "时间来自递归计算（可能较慢）";
   return undefined;
 });
+
+// HuggingFace / 存储后端提示（小徽章）
+const storageBackendBadge = computed(() => {
+  if (props.item?.isDirectory) return "";
+  const backend = String(props.item?.storage_backend || "").toLowerCase();
+  if (backend === "xet") return "Xet";
+  if (backend === "lfs") return "LFS";
+  return "";
+});
+
+const storageBackendBadgeClass = computed(() => {
+  const backend = String(props.item?.storage_backend || "").toLowerCase();
+  if (backend === "xet") return "file-item__backend-badge--xet";
+  if (backend === "lfs") return "file-item__backend-badge--lfs";
+  return "";
+});
+
+const storageBackendBadgeTitle = computed(() => {
+  const backend = String(props.item?.storage_backend || "").toLowerCase();
+  if (backend === "xet") return "HF Xet 存储";
+  if (backend === "lfs") return "Git LFS 指针文件";
+  return undefined;
+});
 </script>
 
 <style scoped>
 /* 基础样式 - 使用 CSS 变量 */
-/* 基础样式 - 移除左边框，只用背景高亮 */
 .file-item {
   display: grid;
   align-items: center;
@@ -374,6 +405,15 @@ const modifiedTitle = computed(() => {
 .file-item__name {
   font-size: var(--explorer-font-size, 14px);
   font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.file-item__name-text {
+  min-width: 0;
+  flex: 1;
 }
 
 /* 文件名过长处理模式 - 省略号（默认） */
@@ -416,6 +456,40 @@ const modifiedTitle = computed(() => {
   white-space: normal;
   word-break: break-word;
   line-height: 1.3;
+}
+
+.file-item__backend-badge {
+  flex-shrink: 0;
+  font-size: 11px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 9999px;
+  border: 1px solid transparent;
+  user-select: none;
+}
+
+.file-item__backend-badge--lfs {
+  background: rgba(107, 114, 128, 0.12);
+  color: rgb(75, 85, 99);
+  border-color: rgba(107, 114, 128, 0.25);
+}
+
+.file-item--dark .file-item__backend-badge--lfs {
+  background: rgba(156, 163, 175, 0.15);
+  color: rgb(229, 231, 235);
+  border-color: rgba(156, 163, 175, 0.25);
+}
+
+.file-item__backend-badge--xet {
+  background: rgba(59, 130, 246, 0.12);
+  color: rgb(29, 78, 216);
+  border-color: rgba(59, 130, 246, 0.25);
+}
+
+.file-item--dark .file-item__backend-badge--xet {
+  background: rgba(96, 165, 250, 0.15);
+  color: rgb(191, 219, 254);
+  border-color: rgba(96, 165, 250, 0.25);
 }
 
 /* 移动端文件大小 */
@@ -473,78 +547,8 @@ const modifiedTitle = computed(() => {
   }
 }
 
-/* 操作按钮基础样式 */
+/* 操作按钮基础样式 - Ghost Style Inlined in Template */
 .file-item__action-btn {
-  padding: 4px;
-  border-radius: 9999px;
-  transition: all var(--duration-fast, 150ms);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-/* 下载按钮 */
-.file-item__action-btn--download-light {
-  color: rgb(37, 99, 235);
-}
-.file-item__action-btn--download-light:hover {
-  background: rgb(229, 231, 235);
-  color: rgb(29, 78, 216);
-}
-.file-item__action-btn--download-dark {
-  color: rgb(96, 165, 250);
-}
-.file-item__action-btn--download-dark:hover {
-  background: rgb(75, 85, 99);
-  color: rgb(147, 197, 253);
-}
-
-/* 链接按钮 */
-.file-item__action-btn--link-light {
-  color: rgb(22, 163, 74);
-}
-.file-item__action-btn--link-light:hover {
-  background: rgb(229, 231, 235);
-  color: rgb(21, 128, 61);
-}
-.file-item__action-btn--link-dark {
-  color: rgb(74, 222, 128);
-}
-.file-item__action-btn--link-dark:hover {
-  background: rgb(75, 85, 99);
-  color: rgb(134, 239, 172);
-}
-
-/* 重命名按钮 */
-.file-item__action-btn--rename-light {
-  color: rgb(202, 138, 4);
-}
-.file-item__action-btn--rename-light:hover {
-  background: rgb(229, 231, 235);
-  color: rgb(161, 98, 7);
-}
-.file-item__action-btn--rename-dark {
-  color: rgb(250, 204, 21);
-}
-.file-item__action-btn--rename-dark:hover {
-  background: rgb(75, 85, 99);
-  color: rgb(253, 224, 71);
-}
-
-/* 删除按钮 */
-.file-item__action-btn--delete-light {
-  color: rgb(220, 38, 38);
-}
-.file-item__action-btn--delete-light:hover {
-  background: rgb(229, 231, 235);
-  color: rgb(185, 28, 28);
-}
-.file-item__action-btn--delete-dark {
-  color: rgb(248, 113, 113);
-}
-.file-item__action-btn--delete-dark:hover {
-  background: rgb(75, 85, 99);
-  color: rgb(252, 165, 165);
 }
 
 /* 禁用动画时移除所有过渡 */

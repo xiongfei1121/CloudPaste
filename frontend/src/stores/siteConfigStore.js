@@ -5,11 +5,14 @@
 
 import { defineStore } from "pinia";
 import { ref, computed } from "vue";
+import { useLocalStorage } from "@vueuse/core";
 import { api } from "@/api";
+import { createLogger } from "@/utils/logger.js";
 
 // 配置常量
 const STORAGE_KEY = "cloudpaste_site_config";
 const CACHE_TTL = 24 * 60 * 60 * 1000; // 24小时缓存时间
+const log = createLogger("SiteConfig");
 
 // ===== Favicon 工具函数 =====
 
@@ -70,9 +73,9 @@ const updatePageFavicon = (faviconUrl) => {
       faviconLink.type = "image/svg+xml";
     }
 
-    console.log("页面favicon已更新:", faviconLink.href);
+    log.debug("页面favicon已更新:", faviconLink.href);
   } catch (error) {
-    console.error("更新页面favicon失败:", error);
+    log.error("更新页面favicon失败:", error);
     // 失败时设置默认favicon
     try {
       let faviconLink = document.querySelector('link[rel="icon"]');
@@ -81,7 +84,7 @@ const updatePageFavicon = (faviconUrl) => {
         faviconLink.type = "image/svg+xml";
       }
     } catch (fallbackError) {
-      console.error("设置默认favicon也失败:", fallbackError);
+      log.error("设置默认favicon也失败:", fallbackError);
     }
   }
 };
@@ -95,9 +98,22 @@ export const useSiteConfigStore = defineStore("siteConfig", () => {
   const siteFooterMarkdown = ref("© 2025 CloudPaste. 保留所有权利。"); // 页脚Markdown内容
   const siteCustomHead = ref(""); // 自定义头部
   const siteCustomBody = ref(""); // 自定义body
+
+  // 前台页面入口开关
+  const siteHomeEditorEnabled = ref(true);
+  const siteUploadPageEnabled = ref(true);
+  const siteMountExplorerEnabled = ref(true);
+
+  // 公告
+  const siteAnnouncementEnabled = ref(false);
+  const siteAnnouncementContent = ref("");
+
   const isLoading = ref(false);
   const lastUpdated = ref(null);
   const isInitialized = ref(false);
+
+  // 缓存：只在需要时写入，避免首次加载就占用 localStorage
+  const storedConfig = useLocalStorage(STORAGE_KEY, null, { writeDefaults: false });
 
   // ===== 计算属性 =====
 
@@ -116,9 +132,14 @@ export const useSiteConfigStore = defineStore("siteConfig", () => {
   const siteConfig = computed(() => ({
     title: siteTitle.value,
     faviconUrl: siteFaviconUrl.value,
+    announcementEnabled: siteAnnouncementEnabled.value,
+    announcementContent: siteAnnouncementContent.value,
     footerMarkdown: siteFooterMarkdown.value,
     customHead: siteCustomHead.value,
     customBody: siteCustomBody.value,
+    homeEditorEnabled: siteHomeEditorEnabled.value,
+    uploadPageEnabled: siteUploadPageEnabled.value,
+    mountExplorerEnabled: siteMountExplorerEnabled.value,
     lastUpdated: lastUpdated.value,
     isInitialized: isInitialized.value,
   }));
@@ -130,9 +151,8 @@ export const useSiteConfigStore = defineStore("siteConfig", () => {
    */
   const loadFromStorage = () => {
     try {
-      const cached = localStorage.getItem(STORAGE_KEY);
-      if (cached) {
-        const config = JSON.parse(cached);
+      const config = storedConfig.value;
+      if (config && typeof config === "object") {
         if (config.title) {
           siteTitle.value = config.title;
         }
@@ -148,16 +168,36 @@ export const useSiteConfigStore = defineStore("siteConfig", () => {
         if (config.customBody !== undefined) {
           siteCustomBody.value = config.customBody || "";
         }
+        if (config.homeEditorEnabled !== undefined) {
+          siteHomeEditorEnabled.value = !!config.homeEditorEnabled;
+        }
+        if (config.uploadPageEnabled !== undefined) {
+          siteUploadPageEnabled.value = !!config.uploadPageEnabled;
+        }
+        if (config.mountExplorerEnabled !== undefined) {
+          siteMountExplorerEnabled.value = !!config.mountExplorerEnabled;
+        }
+        if (config.announcementEnabled !== undefined) {
+          siteAnnouncementEnabled.value = !!config.announcementEnabled;
+        }
+        if (config.announcementContent !== undefined) {
+          siteAnnouncementContent.value = config.announcementContent || "";
+        }
         if (config.lastUpdated) {
           lastUpdated.value = config.lastUpdated;
         }
-        console.log("从缓存加载站点配置:", config);
+
+        // 兼容旧缓存：如果缓存里没有公告字段，则强制视为“缓存不新鲜”，让初始化阶段走一次 API 拉取
+        if (config.announcementEnabled === undefined && config.announcementContent === undefined) {
+          lastUpdated.value = null;
+        }
+        log.debug("从缓存加载站点配置:", config);
         return true;
       }
     } catch (error) {
-      console.warn("加载站点配置缓存失败:", error);
+      log.warn("加载站点配置缓存失败:", error);
       // 清除损坏的缓存
-      localStorage.removeItem(STORAGE_KEY);
+      storedConfig.remove?.();
     }
     return false;
   };
@@ -170,15 +210,20 @@ export const useSiteConfigStore = defineStore("siteConfig", () => {
       const config = {
         title: siteTitle.value,
         faviconUrl: siteFaviconUrl.value,
+        announcementEnabled: siteAnnouncementEnabled.value,
+        announcementContent: siteAnnouncementContent.value,
         footerMarkdown: siteFooterMarkdown.value,
         customHead: siteCustomHead.value,
         customBody: siteCustomBody.value,
+        homeEditorEnabled: siteHomeEditorEnabled.value,
+        uploadPageEnabled: siteUploadPageEnabled.value,
+        mountExplorerEnabled: siteMountExplorerEnabled.value,
         lastUpdated: lastUpdated.value,
       };
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(config));
-      console.log("站点配置已保存到缓存:", config);
+      storedConfig.value = config;
+      log.debug("站点配置已保存到缓存:", config);
     } catch (error) {
-      console.error("保存站点配置到缓存失败:", error);
+      log.error("保存站点配置到缓存失败:", error);
     }
   };
 
@@ -208,6 +253,21 @@ export const useSiteConfigStore = defineStore("siteConfig", () => {
           siteFaviconUrl.value = "";
         }
 
+        // 查找公告设置（站点级：用于全局 Header 显示入口）
+        const announcementEnabledSetting = response.data.find((setting) => setting.key === "site_announcement_enabled");
+        if (announcementEnabledSetting) {
+          siteAnnouncementEnabled.value = announcementEnabledSetting.value === "true";
+        } else {
+          siteAnnouncementEnabled.value = false;
+        }
+
+        const announcementContentSetting = response.data.find((setting) => setting.key === "site_announcement_content");
+        if (announcementContentSetting) {
+          siteAnnouncementContent.value = announcementContentSetting.value || "";
+        } else {
+          siteAnnouncementContent.value = "";
+        }
+
         // 查找页脚Markdown设置
         const footerSetting = response.data.find((setting) => setting.key === "site_footer_markdown");
         if (footerSetting) {
@@ -234,22 +294,49 @@ export const useSiteConfigStore = defineStore("siteConfig", () => {
           siteCustomBody.value = "";
         }
 
+        // 前台页面入口开关
+        const homeEditorEnabledSetting = response.data.find((setting) => setting.key === "site_home_editor_enabled");
+        if (homeEditorEnabledSetting) {
+          siteHomeEditorEnabled.value = homeEditorEnabledSetting.value === "true";
+        } else {
+          siteHomeEditorEnabled.value = true;
+        }
+
+        const uploadPageEnabledSetting = response.data.find((setting) => setting.key === "site_upload_page_enabled");
+        if (uploadPageEnabledSetting) {
+          siteUploadPageEnabled.value = uploadPageEnabledSetting.value === "true";
+        } else {
+          siteUploadPageEnabled.value = true;
+        }
+
+        const mountExplorerEnabledSetting = response.data.find((setting) => setting.key === "site_mount_explorer_enabled");
+        if (mountExplorerEnabledSetting) {
+          siteMountExplorerEnabled.value = mountExplorerEnabledSetting.value === "true";
+        } else {
+          siteMountExplorerEnabled.value = true;
+        }
+
         lastUpdated.value = Date.now();
         saveToStorage();
 
-        console.log("从API加载站点配置成功:", {
+        log.debug("从API加载站点配置成功:", {
           title: siteTitle.value,
           faviconUrl: siteFaviconUrl.value,
+          announcementEnabled: siteAnnouncementEnabled.value,
+          announcementContent: siteAnnouncementContent.value ? "已设置" : "未设置",
           footerMarkdown: siteFooterMarkdown.value,
           customHead: siteCustomHead.value ? "已设置" : "未设置",
           customBody: siteCustomBody.value ? "已设置" : "未设置",
+          homeEditorEnabled: siteHomeEditorEnabled.value,
+          uploadPageEnabled: siteUploadPageEnabled.value,
+          mountExplorerEnabled: siteMountExplorerEnabled.value,
         });
         return true;
       } else {
         throw new Error(response?.message || "获取站点配置失败");
       }
     } catch (error) {
-      console.error("从API获取站点配置失败:", error);
+      log.error("从API获取站点配置失败:", error);
       // API失败时保持当前值或使用默认值
       if (!siteTitle.value || siteTitle.value === "") {
         siteTitle.value = "CloudPaste";
@@ -266,11 +353,11 @@ export const useSiteConfigStore = defineStore("siteConfig", () => {
    */
   const initialize = async () => {
     if (isInitialized.value) {
-      console.log("站点配置已初始化，跳过重复初始化");
+      log.debug("站点配置已初始化，跳过重复初始化");
       return;
     }
 
-    console.log("初始化站点配置...");
+    log.debug("初始化站点配置...");
     isLoading.value = true;
 
     try {
@@ -279,10 +366,10 @@ export const useSiteConfigStore = defineStore("siteConfig", () => {
 
       // 2. 如果缓存有效，直接使用缓存
       if (cacheLoaded && isCacheValid.value) {
-        console.log("使用有效的缓存配置");
+        log.debug("使用有效的缓存配置");
       } else {
         // 3. 缓存无效或不存在，从API获取
-        console.log("缓存无效或不存在，从API获取站点配置");
+        log.debug("缓存无效或不存在，从API获取站点配置");
         await fetchFromAPI();
       }
 
@@ -291,7 +378,7 @@ export const useSiteConfigStore = defineStore("siteConfig", () => {
       injectCustomContent();
       isInitialized.value = true;
     } catch (error) {
-      console.error("初始化站点配置失败:", error);
+      log.error("初始化站点配置失败:", error);
       // 初始化失败时使用默认值
       siteTitle.value = "CloudPaste";
       isInitialized.value = true;
@@ -305,14 +392,14 @@ export const useSiteConfigStore = defineStore("siteConfig", () => {
    * 强制从API重新获取配置
    */
   const refresh = async () => {
-    console.log("刷新站点配置...");
+    log.debug("刷新站点配置...");
     isLoading.value = true;
 
     try {
       await fetchFromAPI();
-      console.log("站点配置刷新成功");
+      log.debug("站点配置刷新成功");
     } catch (error) {
-      console.error("刷新站点配置失败:", error);
+      log.error("刷新站点配置失败:", error);
       throw error;
     } finally {
       isLoading.value = false;
@@ -328,7 +415,7 @@ export const useSiteConfigStore = defineStore("siteConfig", () => {
       siteTitle.value = newTitle.trim() || "CloudPaste";
       lastUpdated.value = Date.now();
       saveToStorage();
-      console.log("站点标题已更新:", siteTitle.value);
+      log.debug("站点标题已更新:", siteTitle.value);
     }
   };
 
@@ -345,7 +432,7 @@ export const useSiteConfigStore = defineStore("siteConfig", () => {
       // 立即更新页面favicon
       updatePageFavicon(siteFaviconUrl.value);
 
-      console.log("站点图标已更新:", siteFaviconUrl.value);
+      log.debug("站点图标已更新:", siteFaviconUrl.value);
     }
   };
 
@@ -358,7 +445,7 @@ export const useSiteConfigStore = defineStore("siteConfig", () => {
       siteFooterMarkdown.value = newFooterMarkdown;
       lastUpdated.value = Date.now();
       saveToStorage();
-      console.log("页脚内容已更新:", siteFooterMarkdown.value);
+      log.debug("页脚内容已更新:", siteFooterMarkdown.value);
     }
   };
 
@@ -366,20 +453,57 @@ export const useSiteConfigStore = defineStore("siteConfig", () => {
    * 注入自定义头部内容到页面头部
    */
   const injectCustomHead = () => {
-    // 移除之前的自定义头部内容
-    const existingHead = document.getElementById("cloudpaste-custom-head");
-    if (existingHead) {
-      existingHead.remove();
-    }
+    // 清理旧的注入内容（兼容旧实现：#cloudpaste-custom-head）
+    document.querySelectorAll("[data-cloudpaste-custom-head='true']").forEach((node) => node.remove());
+    document.getElementById("cloudpaste-custom-head")?.remove();
 
-    // 注入新的自定义头部内容
-    if (siteCustomHead.value) {
-      const headContainer = document.createElement("div");
-      headContainer.id = "cloudpaste-custom-head";
-      headContainer.innerHTML = siteCustomHead.value;
-      document.head.appendChild(headContainer);
-      console.log("自定义头部内容已注入");
-    }
+    const raw = siteCustomHead.value || "";
+    if (!raw.trim()) return;
+
+    // 用 template 解析字符串为 DOM 节点
+    const template = document.createElement("template");
+    template.innerHTML = raw;
+
+    // 放到 head 的开头，且保持用户输入顺序
+    const anchor = document.head.firstChild;
+    const children = Array.from(template.content.children);
+
+    children.forEach((node, index) => {
+      try {
+        const tag = node.tagName?.toLowerCase?.() || "";
+
+        // script 需要“重新创建”才会执行
+        if (tag === "script") {
+          const newScript = document.createElement("script");
+          newScript.setAttribute("data-cloudpaste-custom-head", "true");
+
+          // 复制所有属性（src/async/defer/type/crossorigin 等）
+          Array.from(node.attributes || []).forEach((attr) => {
+            try {
+              newScript.setAttribute(attr.name, attr.value);
+            } catch (e) {
+              // 忽略单个属性复制失败
+            }
+          });
+
+          // 内联脚本内容
+          if (!newScript.src) {
+            newScript.textContent = node.textContent || "";
+          }
+
+          document.head.insertBefore(newScript, anchor);
+          return;
+        }
+
+        // 其它标签（style/link/meta 等）直接插入 head
+        node.setAttribute("data-cloudpaste-custom-head", "true");
+        document.head.insertBefore(node, anchor);
+      } catch (error) {
+        log.error(`自定义头部注入失败 (${index + 1}):`, error);
+      }
+    });
+
+    log.debug("自定义头部内容已注入");
   };
 
   // ===== DOM查询缓存和性能优化 =====
@@ -387,6 +511,7 @@ export const useSiteConfigStore = defineStore("siteConfig", () => {
   // DOM查询缓存
   let appContainerCache = null;
   let injectTimeout = null;
+  let pendingBodyInjectRetries = 0;
 
   /**
    * 获取Vue应用容器（带缓存）
@@ -409,14 +534,31 @@ export const useSiteConfigStore = defineStore("siteConfig", () => {
 
     if (!siteCustomBody.value) return;
 
+    const targetContainer = getAppContainer();
+    if (!targetContainer) {
+      if (pendingBodyInjectRetries < 30) {
+        pendingBodyInjectRetries += 1;
+        clearTimeout(injectTimeout);
+        injectTimeout = setTimeout(() => {
+          injectCustomBody();
+        }, 100);
+        return;
+      }
+
+      // 兜底：重试多次仍找不到容器时，退回插入到 body，至少保证内容不丢
+      log.warn("未找到 .app-container，已退回把自定义 body 内容插入到 document.body");
+      pendingBodyInjectRetries = 0;
+    } else {
+      pendingBodyInjectRetries = 0;
+    }
+
     // 创建并注入容器
     const container = document.createElement("div");
     container.id = "cloudpaste-custom-body";
     container.innerHTML = siteCustomBody.value;
 
-    // 注入到Vue应用容器或body
-    const targetContainer = getAppContainer() || document.body;
-    targetContainer.appendChild(container);
+    // 注入到Vue应用容器；兜底时才插入 body
+    (targetContainer || document.body).appendChild(container);
 
     // 执行脚本
     container.querySelectorAll("script").forEach((script, index) => {
@@ -439,11 +581,11 @@ export const useSiteConfigStore = defineStore("siteConfig", () => {
         document.head.appendChild(newScript);
         script.remove(); // 移除原脚本标签
       } catch (error) {
-        console.error(`脚本执行失败 (${index + 1}):`, error);
+        log.error(`脚本执行失败 (${index + 1}):`, error);
       }
     });
 
-    console.log("自定义body内容已注入并执行");
+    log.debug("自定义body内容已注入并执行");
   };
 
   /**
@@ -487,9 +629,9 @@ export const useSiteConfigStore = defineStore("siteConfig", () => {
    * 清理所有自定义DOM内容
    */
   const cleanupCustomContent = () => {
-    // 清理自定义头部内容
-    const existingHead = document.getElementById("cloudpaste-custom-head");
-    if (existingHead) existingHead.remove();
+    // 清理自定义头部内容（兼容旧实现：#cloudpaste-custom-head）
+    document.querySelectorAll("[data-cloudpaste-custom-head='true']").forEach((node) => node.remove());
+    document.getElementById("cloudpaste-custom-head")?.remove();
 
     // 清理自定义body内容
     const existingBody = document.getElementById("cloudpaste-custom-body");
@@ -509,12 +651,17 @@ export const useSiteConfigStore = defineStore("siteConfig", () => {
   const reset = () => {
     siteTitle.value = "CloudPaste";
     siteFaviconUrl.value = "";
+    siteAnnouncementEnabled.value = false;
+    siteAnnouncementContent.value = "";
     siteFooterMarkdown.value = "© 2025 CloudPaste. 保留所有权利。";
     siteCustomHead.value = "";
     siteCustomBody.value = "";
+    siteHomeEditorEnabled.value = true;
+    siteUploadPageEnabled.value = true;
+    siteMountExplorerEnabled.value = true;
     lastUpdated.value = null;
     isInitialized.value = false;
-    localStorage.removeItem(STORAGE_KEY);
+    storedConfig.remove?.();
 
     // 重置favicon为默认
     updatePageFavicon("");
@@ -522,7 +669,7 @@ export const useSiteConfigStore = defineStore("siteConfig", () => {
     // 清理所有自定义内容
     cleanupCustomContent();
 
-    console.log("站点配置已重置");
+    log.debug("站点配置已重置");
   };
 
   /**
@@ -536,7 +683,12 @@ export const useSiteConfigStore = defineStore("siteConfig", () => {
       cacheAge: lastUpdated.value ? Date.now() - lastUpdated.value : null,
       title: siteTitle.value,
       faviconUrl: siteFaviconUrl.value,
+      announcementEnabled: siteAnnouncementEnabled.value,
+      announcementContent: siteAnnouncementContent.value,
       footerMarkdown: siteFooterMarkdown.value,
+      homeEditorEnabled: siteHomeEditorEnabled.value,
+      uploadPageEnabled: siteUploadPageEnabled.value,
+      mountExplorerEnabled: siteMountExplorerEnabled.value,
     };
   };
 
@@ -545,9 +697,14 @@ export const useSiteConfigStore = defineStore("siteConfig", () => {
     // 状态
     siteTitle,
     siteFaviconUrl,
+    siteAnnouncementEnabled,
+    siteAnnouncementContent,
     siteFooterMarkdown,
     siteCustomHead,
     siteCustomBody,
+    siteHomeEditorEnabled,
+    siteUploadPageEnabled,
+    siteMountExplorerEnabled,
     isLoading,
     lastUpdated,
     isInitialized,

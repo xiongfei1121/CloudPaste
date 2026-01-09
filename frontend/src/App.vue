@@ -1,6 +1,7 @@
 <script setup>
-import { ref, onMounted, onBeforeUnmount, computed } from "vue";
+import { ref, onMounted, computed } from "vue";
 import { useRoute } from "vue-router";
+import { useEventListener } from "@vueuse/core";
 import EnvSwitcher from "./components/EnvSwitcher.vue";
 import LanguageSwitcher from "./components/LanguageSwitcher.vue";
 import PWAInstallPrompt from "./components/PWAInstallPrompt.vue";
@@ -10,11 +11,14 @@ import { useSiteConfigStore } from "./stores/siteConfigStore.js";
 import FooterMarkdownRenderer from "./modules/admin/components/FooterMarkdownRenderer.vue";
 import { useGlobalMessage } from "@/composables/core/useGlobalMessage.js";
 import { useThemeMode } from "@/composables/core/useThemeMode.js";
-import { IconClose, IconComputerDesktop, IconGithub, IconHamburger, IconMoon, IconSun } from "@/components/icons";
-import { Notivue, NotivueSwipe, Notification, NotificationProgress } from "notivue";
+import AnnouncementModal from "@/modules/admin/components/AnnouncementModal.vue";
+import { IconBell, IconClose, IconComputerDesktop, IconGithub, IconHamburger, IconMoon, IconSun } from "@/components/icons";
+import { Notivue, NotivueSwipe, Notification } from "notivue";
 import { cloudPasteLightTheme, cloudPasteDarkTheme } from "@/styles/notivueTheme";
+import { createLogger } from "@/utils/logger.js";
 
 const route = useRoute();
+const log = createLogger("App");
 
 // 使用认证Store和站点配置Store
 const authStore = useAuthStore();
@@ -30,6 +34,32 @@ const { clearMessage, showMessage } = useGlobalMessage();
 const activePage = computed(() => {
   return route.meta?.originalPage || "home";
 });
+
+// 前台入口开关（站点设置）
+// - store 未初始化前，先按“都显示”处理，避免把用户锁死在空白页面
+const canShowHomeEntry = computed(() => !siteConfigStore.isInitialized || siteConfigStore.siteHomeEditorEnabled);
+const canShowUploadEntry = computed(() => !siteConfigStore.isInitialized || siteConfigStore.siteUploadPageEnabled);
+const canShowMountEntry = computed(() => !siteConfigStore.isInitialized || siteConfigStore.siteMountExplorerEnabled);
+
+// 公告入口（全站）：只有“启用 + 有内容”才显示
+const announcementModalRef = ref(null);
+const canShowAnnouncementEntry = computed(() => {
+  if (!siteConfigStore.isInitialized) return false;
+  if (!siteConfigStore.siteAnnouncementEnabled) return false;
+  const content = siteConfigStore.siteAnnouncementContent || "";
+  return !!content.trim();
+});
+
+const hasUnseenAnnouncement = computed(() => {
+  const exposed = announcementModalRef.value;
+  const raw = exposed?.hasUnseenAnnouncement;
+  if (typeof raw === "boolean") return raw;
+  return !!raw?.value;
+});
+
+const openAnnouncement = () => {
+  announcementModalRef.value?.open?.();
+};
 
 // 过渡状态，用于页面切换动画
 const transitioning = ref(false);
@@ -50,6 +80,11 @@ const isDev = import.meta.env.DEV;
   const shouldShowFooter = computed(() => {
     // 管理面板页面不显示页脚
     if (activePage.value === "admin") {
+      return false;
+    }
+
+    // 站点配置还没初始化完之前，不要先按默认值显示页脚
+    if (!siteConfigStore.isInitialized) {
       return false;
     }
 
@@ -94,21 +129,17 @@ const isDev = import.meta.env.DEV;
       showEnvSwitcher.value = hasAdminToken && hasEnvParam;
     }
 
-    console.log("应用初始化完成");
+    log.debug("应用初始化完成");
 
-    window.addEventListener("global-message", handleGlobalMessageEvent);
-    window.addEventListener("global-message-clear", handleGlobalMessageClearEvent);
+    useEventListener(window, "global-message", handleGlobalMessageEvent);
+    useEventListener(window, "global-message-clear", handleGlobalMessageClearEvent);
   });
 
-  // 组件卸载时不再需要额外清理主题监听（由 useThemeMode 管理）
-  onBeforeUnmount(() => {
-    window.removeEventListener("global-message", handleGlobalMessageEvent);
-    window.removeEventListener("global-message-clear", handleGlobalMessageClearEvent);
-  });
+
 </script>
 
 <template>
-  <div :class="['app-container min-h-screen transition-colors duration-200', isDarkMode ? 'bg-custom-bg-900 text-custom-text-dark' : 'bg-custom-bg-50 text-custom-text']">
+  <div :class="['app-container min-h-[100dvh] transition-colors duration-200', isDarkMode ? 'bg-custom-bg-900 text-custom-text-dark' : 'bg-custom-bg-50 text-custom-text']">
     <header :class="['sticky top-0 z-50 shadow-sm transition-colors', isDarkMode ? 'bg-custom-surface-dark' : 'bg-custom-surface']">
       <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div class="flex justify-between h-16">
@@ -119,6 +150,7 @@ const isDev = import.meta.env.DEV;
             <nav class="hidden sm:ml-6 sm:flex sm:space-x-8">
               <router-link
                 to="/"
+                v-if="canShowHomeEntry"
                 :class="[
                   activePage === 'home' ? 'border-primary-500 text-current' : 'border-transparent hover:border-gray-300',
                   'inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium transition-colors duration-200',
@@ -129,6 +161,7 @@ const isDev = import.meta.env.DEV;
               </router-link>
               <router-link
                 to="/upload"
+                v-if="canShowUploadEntry"
                 :class="[
                   activePage === 'upload' ? 'border-primary-500 text-current' : 'border-transparent hover:border-gray-300',
                   'inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium transition-colors duration-200',
@@ -139,6 +172,7 @@ const isDev = import.meta.env.DEV;
               </router-link>
               <router-link
                 to="/mount-explorer"
+                v-if="canShowMountEntry"
                 :class="[
                   activePage === 'mount-explorer' ? 'border-primary-500 text-current' : 'border-transparent hover:border-gray-300',
                   'inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium transition-colors duration-200',
@@ -174,6 +208,26 @@ const isDev = import.meta.env.DEV;
               <IconGithub size="md" aria-hidden="true" />
             </a>
 
+            <button
+              v-if="canShowAnnouncementEntry"
+              type="button"
+              @click="openAnnouncement"
+              :class="[
+                'relative p-2 rounded-full focus:outline-none transition-colors',
+                isDarkMode ? 'text-gray-300 hover:text-white hover:bg-gray-700' : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100',
+              ]"
+              :aria-label="$t('announcement.title')"
+              :title="$t('announcement.title')"
+            >
+              <IconBell size="md" aria-hidden="true" />
+              <span
+                v-if="hasUnseenAnnouncement"
+                class="absolute top-1 right-1 w-2 h-2 rounded-full bg-red-500 ring-2"
+                :class="isDarkMode ? 'ring-gray-800' : 'ring-white'"
+                aria-hidden="true"
+              ></span>
+            </button>
+
             <LanguageSwitcher :darkMode="isDarkMode" />
 
             <button
@@ -206,6 +260,26 @@ const isDev = import.meta.env.DEV;
             >
               <IconGithub size="md" aria-hidden="true" />
             </a>
+
+            <button
+              v-if="canShowAnnouncementEntry"
+              type="button"
+              @click="openAnnouncement"
+              :class="[
+                'relative p-2 rounded-full focus:outline-none transition-colors mr-2',
+                isDarkMode ? 'text-gray-300 hover:text-white hover:bg-gray-700' : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100',
+              ]"
+              :aria-label="$t('announcement.title')"
+              :title="$t('announcement.title')"
+            >
+              <IconBell size="md" aria-hidden="true" />
+              <span
+                v-if="hasUnseenAnnouncement"
+                class="absolute top-1 right-1 w-2 h-2 rounded-full bg-red-500 ring-2"
+                :class="isDarkMode ? 'ring-gray-800' : 'ring-white'"
+                aria-hidden="true"
+              ></span>
+            </button>
 
             <LanguageSwitcher :darkMode="isDarkMode" class="mr-2" />
 
@@ -254,6 +328,7 @@ const isDev = import.meta.env.DEV;
           <router-link
             to="/"
             @click="isMobileMenuOpen = false"
+            v-if="canShowHomeEntry"
             :class="[
               'flex items-center px-4 py-3 transition-colors duration-200',
               activePage === 'home'
@@ -270,6 +345,7 @@ const isDev = import.meta.env.DEV;
           <router-link
             to="/upload"
             @click="isMobileMenuOpen = false"
+            v-if="canShowUploadEntry"
             :class="[
               'flex items-center px-4 py-3 transition-colors duration-200',
               activePage === 'upload'
@@ -286,6 +362,7 @@ const isDev = import.meta.env.DEV;
           <router-link
             to="/mount-explorer"
             @click="isMobileMenuOpen = false"
+            v-if="canShowMountEntry"
             :class="[
               'flex items-center px-4 py-3 transition-colors duration-200',
               activePage === 'mount-explorer'
@@ -335,6 +412,15 @@ const isDev = import.meta.env.DEV;
     <!-- PWA 安装提示组件 -->
     <PWAInstallPrompt :dark-mode="isDarkMode" />
 
+    <!-- 公告：全站右上角入口打开 -->
+    <AnnouncementModal
+      ref="announcementModalRef"
+      :content="siteConfigStore.siteAnnouncementContent"
+      :enabled="siteConfigStore.siteAnnouncementEnabled"
+      :dark-mode="isDarkMode"
+      :auto-open="false"
+    />
+
     <!-- 全局音乐播放器 -->
     <GlobalMusicPlayer />
 
@@ -344,9 +430,7 @@ const isDev = import.meta.env.DEV;
         <Notification
           :item="item"
           :theme="isDarkMode ? cloudPasteDarkTheme : cloudPasteLightTheme"
-        >
-          <NotificationProgress :item="item" />
-        </Notification>
+        />
       </NotivueSwipe>
     </Notivue>
   </div>

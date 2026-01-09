@@ -32,12 +32,14 @@ export class LocalStorageDriver extends BaseDriver {
       CAPABILITIES.READER,
       CAPABILITIES.WRITER,
       CAPABILITIES.ATOMIC,
-      CAPABILITIES.SEARCH,
       CAPABILITIES.PROXY,
     ];
 
     /** @type {string|null} root_path 规范化后的监狱根目录 */
     this.rootPath = null;
+
+    // 是否启用“磁盘配额读取”
+    this.enableDiskUsage = config?.enable_disk_usage === 1;
   }
 
   /**
@@ -86,7 +88,7 @@ export class LocalStorageDriver extends BaseDriver {
     // 是否允许在根目录不存在时自动创建（默认关闭，保持显式运维语义）
     const autoCreateRoot =
       this.config && Object.prototype.hasOwnProperty.call(this.config, "auto_create_root")
-        ? Boolean(this.config.auto_create_root)
+        ? this.config.auto_create_root === 1
         : false;
 
     let stat;
@@ -180,6 +182,84 @@ export class LocalStorageDriver extends BaseDriver {
   }
 
   /**
+   * 获取存储驱动统计信息（可选实现）
+   * - 对 LOCAL：这里返回的是“宿主机磁盘/分区”的总量与可用量（类似 df），不是“目录占用”
+   * - 目录占用（local_fs）属于 computed_usage 的来源，由 StorageUsageService 扫 root_path 计算
+   *
+   * @returns {Promise<Object>}
+   */
+  async getStats() {
+    this._ensureInitialized();
+
+    const base = {
+      type: this.type,
+      capabilities: this.capabilities,
+      initialized: this.initialized,
+      rootPath: this.rootPath,
+      timestamp: new Date().toISOString(),
+      enableDiskUsage: this.enableDiskUsage,
+    };
+
+    if (!this.enableDiskUsage) {
+      return {
+        ...base,
+        supported: false,
+        message: "LOCAL 磁盘占用统计未启用（enable_disk_usage = false）",
+      };
+    }
+
+    // Node.js 18+ 支持 fs.promises.statfs；用于读取文件系统容量（Windows/Linux/macOS）
+    if (typeof fs.promises.statfs !== "function") {
+      return {
+        ...base,
+        supported: false,
+        message: "当前 Node.js 版本不支持 statfs，无法读取磁盘容量信息",
+      };
+    }
+
+    try {
+      const st = await fs.promises.statfs(this.rootPath);
+      const frsize = Number(st?.frsize || st?.bsize || 0);
+      const blocks = Number(st?.blocks || 0);
+      const bavail = Number(st?.bavail || 0);
+      if (!Number.isFinite(frsize) || !Number.isFinite(blocks) || frsize <= 0 || blocks <= 0) {
+        return {
+          ...base,
+          supported: false,
+          message: "读取磁盘容量信息失败（statfs 返回值无效）",
+        };
+      }
+
+      const totalBytes = Math.max(0, Math.trunc(frsize * blocks));
+      const remainingBytes = Math.max(0, Math.trunc(frsize * bavail));
+      const usedBytes = totalBytes > 0 ? Math.max(0, totalBytes - remainingBytes) : null;
+
+      let usagePercent = null;
+      if (totalBytes > 0 && usedBytes != null) {
+        usagePercent = Math.min(100, Math.round((usedBytes / totalBytes) * 100));
+      }
+
+      return {
+        ...base,
+        supported: true,
+        quota: {
+          raw: st,
+          totalBytes,
+          usedBytes,
+          remainingBytes,
+          usagePercent,
+        },
+      };
+    } catch (error) {
+      return {
+        ...base,
+        supported: false,
+        message: error?.message || String(error),
+      };
+    }
+  }
+
+  /**
    * 解析八进制权限字符串
    * @param {string|undefined} value - 权限字符串（如 "0755"）
    * @param {number} defaultValue - 默认值
@@ -266,15 +346,15 @@ export class LocalStorageDriver extends BaseDriver {
 
   /**
    * 列出目录内容
-   * @param {string} fsPath    挂载视图路径（例如 /local/docs/）
-   * @param {Object} options   上下文选项（mount/subPath/db 等）
+   * @param {string} subPath  挂载内子路径（以 / 开头，目录以 / 结尾）
+   * @param {Object} ctx      上下文（mount/path/subPath/db 等）
    */
-  async listDirectory(fsPath, options = {}) {
+  async listDirectory(subPath, ctx = {}) {
     this._ensureInitialized();
-    const { mount, subPath = "", db } = options;
+    const { mount, path: fsPath, db } = ctx;
 
-    const effectiveSubPath = subPath ?? this._extractSubPath(fsPath, mount);
-    const { fullPath } = await this._resolveLocalPath(effectiveSubPath || "/", { mustBeDirectory: true });
+    const effectiveSubPath = subPath || "/";
+    const { fullPath } = await this._resolveLocalPath(effectiveSubPath, { mustBeDirectory: true });
 
     let entries;
     try {
@@ -283,7 +363,7 @@ export class LocalStorageDriver extends BaseDriver {
       throw this._wrapFsError(error, "列出目录失败");
     }
 
-    const basePath = this._buildMountPath(mount, effectiveSubPath || "");
+    const basePath = fsPath;
 
     const items = await Promise.all(
       entries.map(async (dirent) => {
@@ -321,7 +401,7 @@ export class LocalStorageDriver extends BaseDriver {
     );
 
     return {
-      path: basePath,
+      path: fsPath,
       type: "directory",
       isRoot: effectiveSubPath === "" || effectiveSubPath === "/",
       isVirtual: false,
@@ -333,15 +413,15 @@ export class LocalStorageDriver extends BaseDriver {
 
   /**
    * 获取文件或目录信息
-   * @param {string} fsPath   挂载视图路径
-   * @param {Object} options  上下文选项（mount/subPath/db 等）
+   * @param {string} subPath 挂载内子路径（以 / 开头）
+   * @param {Object} ctx     上下文（mount/path/subPath/db 等）
    */
-  async getFileInfo(fsPath, options = {}) {
+  async getFileInfo(subPath, ctx = {}) {
     this._ensureInitialized();
-    const { mount, subPath = "", db } = options;
+    const { mount, path: fsPath, db } = ctx;
 
-    const effectiveSubPath = subPath ?? this._extractSubPath(fsPath, mount);
-    const { fullPath, stat } = await this._resolveLocalPath(effectiveSubPath || "/", { mustBeDirectory: false });
+    const effectiveSubPath = subPath || "/";
+    const { fullPath, stat } = await this._resolveLocalPath(effectiveSubPath, { mustBeDirectory: false });
 
     const isDirectory = stat.isDirectory();
     const name = this._basename(fsPath);
@@ -367,16 +447,16 @@ export class LocalStorageDriver extends BaseDriver {
 
   /**
    * 下载文件 - 返回 StorageStreamDescriptor
-   * @param {string} fsPath   挂载视图路径
-   * @param {Object} options  上下文选项（mount/subPath/request 等）
+   * @param {string} subPath 挂载内子路径
+   * @param {Object} ctx     上下文（mount/path/subPath/request 等）
    * @returns {Promise<import('../../streaming/types.js').StorageStreamDescriptor>}
    */
-  async downloadFile(fsPath, options = {}) {
+  async downloadFile(subPath, ctx = {}) {
     this._ensureInitialized();
-    const { mount, subPath = "" } = options;
+    const { mount, path: fsPath } = ctx;
 
-    const effectiveSubPath = subPath ?? this._extractSubPath(fsPath, mount);
-    const { fullPath, stat } = await this._resolveLocalPath(effectiveSubPath || "/", { mustBeDirectory: false });
+    const effectiveSubPath = subPath || "/";
+    const { fullPath, stat } = await this._resolveLocalPath(effectiveSubPath, { mustBeDirectory: false });
 
     if (stat.isDirectory()) {
       throw new DriverError("无法直接下载目录", {
@@ -417,16 +497,16 @@ export class LocalStorageDriver extends BaseDriver {
 
   /**
    * 统一上传入口（文件 / 流）
-   * @param {string} fsPath        目标路径（挂载视图）
+   * @param {string} subPath       目标子路径（挂载内）
    * @param {any}    fileOrStream  数据源（ReadableStream/Node Stream/Buffer/File/Blob/string 等）
-   * @param {Object} options       上下文选项（mount/subPath/db/filename/contentType/contentLength 等）
+   * @param {Object} ctx           上下文（mount/path/subPath/db/filename/contentType/contentLength 等）
    */
-  async uploadFile(fsPath, fileOrStream, options = {}) {
+  async uploadFile(subPath, fileOrStream, ctx = {}) {
     this._ensureInitialized();
     this._ensureWritable();
 
-    const { mount, subPath = "", filename } = options;
-    const effectiveSubPath = subPath ?? this._extractSubPath(fsPath, mount);
+    const { mount, path: fsPath, filename } = ctx;
+    const effectiveSubPath = subPath ?? "";
     const name = filename || this._basename(fsPath);
 
     const targetSubPath = this._resolveTargetSubPath(effectiveSubPath, name);
@@ -446,16 +526,19 @@ export class LocalStorageDriver extends BaseDriver {
 
   /**
    * 更新文件内容（覆盖写入，语义与 uploadFile 一致）
-   * @param {string} fsPath   文件路径（挂载视图）
+   * @param {string} subPath  子路径（subPath-only）
    * @param {string|Uint8Array|ArrayBuffer|ReadableStream|Blob|File} content 新内容
-   * @param {Object} options  上下文选项（mount/subPath 等）
+   * @param {Object} ctx      上下文（mount/path/subPath/db 等）
    */
-  async updateFile(fsPath, content, options = {}) {
+  async updateFile(subPath, content, ctx = {}) {
     this._ensureInitialized();
     this._ensureWritable();
-    const { mount, subPath = "" } = options;
+    const fsPath = ctx?.path;
+    if (typeof fsPath !== "string") {
+      throw new ValidationError("LOCAL.updateFile: 缺少 ctx.path（FS 视图路径）", { status: ApiStatus.INTERNAL_ERROR });
+    }
 
-    const effectiveSubPath = subPath ?? this._extractSubPath(fsPath, mount);
+    const effectiveSubPath = subPath || "";
     const targetSubPath = this._resolveTargetSubPath(effectiveSubPath, this._basename(fsPath));
     const targetOsPath = await this._buildTargetPath(targetSubPath);
 
@@ -473,15 +556,15 @@ export class LocalStorageDriver extends BaseDriver {
 
   /**
    * 创建目录
-   * @param {string} fsPath   目录路径（挂载视图）
-   * @param {Object} options  上下文选项（mount/subPath 等）
+   * @param {string} subPath  目录子路径（挂载内）
+   * @param {Object} ctx      上下文（mount/path/subPath 等）
    */
-  async createDirectory(fsPath, options = {}) {
+  async createDirectory(subPath, ctx = {}) {
     this._ensureInitialized();
     this._ensureWritable();
-    const { mount, subPath = "" } = options;
+    const { path: fsPath } = ctx;
 
-    const effectiveSubPath = subPath ?? this._extractSubPath(fsPath, mount);
+    const effectiveSubPath = subPath ?? "";
     const targetOsPath = await this._buildTargetPath(effectiveSubPath || "/");
 
     try {
@@ -509,13 +592,13 @@ export class LocalStorageDriver extends BaseDriver {
 
   /**
    * 批量删除文件/目录
-   * @param {Array<string>} paths 路径数组（挂载视图）
-   * @param {Object} options      上下文选项（mount 等）
+   * @param {Array<string>} subPaths 子路径数组（挂载内）
+   * @param {Object} ctx           上下文（mount/paths 等）
    */
-  async batchRemoveItems(paths, options = {}) {
+  async batchRemoveItems(subPaths, ctx = {}) {
     this._ensureInitialized();
     this._ensureWritable();
-    const { mount } = options;
+    const { paths } = ctx;
 
     const result = {
       success: 0,
@@ -523,12 +606,13 @@ export class LocalStorageDriver extends BaseDriver {
       results: [],
     };
 
-    if (!Array.isArray(paths) || paths.length === 0) {
+    if (!Array.isArray(subPaths) || subPaths.length === 0) {
       return result;
     }
 
-    for (const p of paths) {
-      const sub = this._extractSubPath(p, mount);
+    for (let i = 0; i < subPaths.length; i++) {
+      const sub = subPaths[i];
+      const p = Array.isArray(paths) ? paths[i] : null;
       try {
         const { fullPath, stat } = await this._resolveLocalPath(sub || "/", { mustBeDirectory: false });
 
@@ -544,12 +628,12 @@ export class LocalStorageDriver extends BaseDriver {
           }
         }
         result.success += 1;
-        result.results.push({ path: p, success: true });
+        result.results.push({ path: p || sub, success: true });
       } catch (error) {
         const wrapped =
           error instanceof AppError || error instanceof DriverError ? error : this._wrapFsError(error, "删除失败");
-        result.failed.push({ path: p, error: wrapped.message });
-        result.results.push({ path: p, success: false, error: wrapped.message });
+        result.failed.push({ path: p || sub, error: wrapped.message });
+        result.results.push({ path: p || sub, success: false, error: wrapped.message });
       }
     }
 
@@ -558,21 +642,18 @@ export class LocalStorageDriver extends BaseDriver {
 
   /**
    * 重命名文件或目录（同挂载内）
-   * @param {string} oldPath 原路径（挂载视图）
-   * @param {string} newPath 新路径（挂载视图）
-   * @param {Object} options 上下文选项（mount 等）
+   * @param {string} oldSubPath 原子路径（挂载内）
+   * @param {string} newSubPath 新子路径（挂载内）
+   * @param {Object} ctx 上下文（mount/oldPath/newPath 等）
    */
-  async renameItem(oldPath, newPath, options = {}) {
+  async renameItem(oldSubPath, newSubPath, ctx = {}) {
     this._ensureInitialized();
     this._ensureWritable();
-    const { mount } = options;
-
-    const oldSub = this._extractSubPath(oldPath, mount);
-    const newSub = this._extractSubPath(newPath, mount);
+    const { oldPath, newPath } = ctx;
 
     try {
-      const { fullPath: sourceOsPath } = await this._resolveLocalPath(oldSub || "/", { mustBeDirectory: false });
-      const targetOsPath = await this._buildTargetPath(newSub || "/");
+      const { fullPath: sourceOsPath } = await this._resolveLocalPath(oldSubPath || "/", { mustBeDirectory: false });
+      const targetOsPath = await this._buildTargetPath(newSubPath || "/");
 
       await fs.promises.mkdir(path.dirname(targetOsPath), { recursive: true });
       await fs.promises.rename(sourceOsPath, targetOsPath);
@@ -596,24 +677,21 @@ export class LocalStorageDriver extends BaseDriver {
 
   /**
    * 复制单个文件或目录（同挂载内）
-   * @param {string} sourcePath 源路径（挂载视图）
-   * @param {string} targetPath 目标路径（挂载视图）
-   * @param {Object} options    选项（mount, skipExisting 等）
+   * @param {string} sourceSubPath 源子路径（挂载内）
+   * @param {string} targetSubPath 目标子路径（挂载内）
+   * @param {Object} ctx           上下文（mount/sourcePath/targetPath/skipExisting 等）
    * @returns {Promise<{status:string, source:string, target:string, message?:string, skipped?:boolean, reason?:string}>}
    */
-  async copyItem(sourcePath, targetPath, options = {}) {
+  async copyItem(sourceSubPath, targetSubPath, ctx = {}) {
     this._ensureInitialized();
     this._ensureWritable();
-    const { mount, skipExisting = false } = options;
-
-    const sourceSub = this._extractSubPath(sourcePath, mount);
-    const targetSub = this._extractSubPath(targetPath, mount);
+    const { sourcePath, targetPath, skipExisting = false } = ctx;
 
     try {
-      const { fullPath: sourceOsPath, stat } = await this._resolveLocalPath(sourceSub || "/", {
+      const { fullPath: sourceOsPath, stat } = await this._resolveLocalPath(sourceSubPath || "/", {
         mustBeDirectory: false,
       });
-      const targetOsPath = await this._buildTargetPath(targetSub || "/");
+      const targetOsPath = await this._buildTargetPath(targetSubPath || "/");
 
       let targetExists = false;
       try {
@@ -655,7 +733,7 @@ export class LocalStorageDriver extends BaseDriver {
         source: sourcePath,
         target: targetPath,
         skipped: false,
-        reason: wrapped.message,
+        message: wrapped.message,
       };
     }
   }
@@ -664,22 +742,21 @@ export class LocalStorageDriver extends BaseDriver {
 
   /**
    * 获取文件或目录状态信息
-   * @param {string} fsPath   挂载视图路径
-   * @param {Object} options  上下文选项
+   * @param {string} subPath  挂载内子路径（subPath-only）
+   * @param {Object} ctx      上下文选项（mount/path/subPath/...）
    */
-  async stat(fsPath, options = {}) {
-    const info = await this.getFileInfo(fsPath, options);
-    return info;
+  async stat(subPath, ctx = {}) {
+    return await this.getFileInfo(subPath, ctx);
   }
 
   /**
    * 检查文件或目录是否存在
-   * @param {string} fsPath   挂载视图路径
-   * @param {Object} options  上下文选项
+   * @param {string} subPath  挂载内子路径（subPath-only）
+   * @param {Object} ctx      上下文选项（mount/path/subPath/...）
    */
-  async exists(fsPath, options = {}) {
+  async exists(subPath, ctx = {}) {
     try {
-      await this.getFileInfo(fsPath, options);
+      await this.getFileInfo(subPath, ctx);
       return true;
     } catch (error) {
       if (error instanceof NotFoundError) {
@@ -689,134 +766,20 @@ export class LocalStorageDriver extends BaseDriver {
     }
   }
 
-  // ========== SEARCH 能力：search ==========
-
-  /**
-   * 在本地文件系统挂载内搜索文件（按文件名模糊匹配）
-   * @param {string} query   搜索关键字
-   * @param {Object} options 搜索选项
-   * @param {Object} options.mount       挂载对象
-   * @param {string|null} options.searchPath 搜索起始路径（挂载视图）
-   * @param {number} options.maxResults  最大结果数量
-   * @param {D1Database} options.db      数据库实例
-   * @returns {Promise<Array<Object>>}
-   */
-  async search(query, options = {}) {
-    this._ensureInitialized();
-    const { mount, searchPath = null, maxResults = 1000, db } = options;
-
-    if (!mount) {
-      throw new ValidationError("LOCAL 搜索需要提供挂载点信息");
-    }
-
-    const trimmedQuery = String(query || "").trim();
-    if (!trimmedQuery) {
-      throw new ValidationError("搜索关键字不能为空");
-    }
-
-    // 计算相对于挂载点的子路径
-    let baseSubPath = "";
-    if (searchPath) {
-      baseSubPath = this._extractSubPath(searchPath, mount) || "";
-    }
-    const normalizedBaseSubPath = this._normalizeSubPath(baseSubPath);
-
-    // 解析搜索起点目录（如果是文件则退化为其父目录）
-    const { fullPath: startPath, stat } = await this._resolveLocalPath(normalizedBaseSubPath || "/", {
-      mustBeDirectory: false,
-    });
-
-    const startDir = stat.isDirectory() ? startPath : path.dirname(startPath);
-    const startSubPath = stat.isDirectory()
-      ? normalizedBaseSubPath
-      : this._normalizeSubPath(path.posix.dirname(normalizedBaseSubPath || ""));
-
-    const lowerQuery = trimmedQuery.toLowerCase();
-    const results = [];
-
-    const walk = async (dirOsPath, currentSubPath) => {
-      if (results.length >= maxResults) return;
-
-      let entries;
-      try {
-        entries = await fs.promises.readdir(dirOsPath, { withFileTypes: true });
-      } catch (error) {
-        throw this._wrapFsError(error, "扫描本地目录失败");
-      }
-
-      for (const entry of entries) {
-        if (results.length >= maxResults) break;
-
-        if (entry.isSymbolicLink()) {
-          // 为避免 symlink 逃逸或循环，这里不跟随符号链接
-          continue;
-        }
-
-        const entryName = entry.name;
-        const nextSubPath = this._normalizeSubPath(
-          currentSubPath ? `${currentSubPath}/${entryName}` : entryName,
-        );
-        const entryOsPath = path.join(dirOsPath, entryName);
-
-        if (entry.isDirectory()) {
-          await walk(entryOsPath, nextSubPath);
-          continue;
-        }
-
-        const normalizedName = entryName.toLowerCase();
-        if (!normalizedName.includes(lowerQuery)) {
-          continue;
-        }
-
-        let statInfo;
-        try {
-          statInfo = await fs.promises.stat(entryOsPath);
-        } catch (error) {
-          // 读取失败时跳过当前条目
-          continue;
-        }
-
-        const size = statInfo.size || 0;
-        const modified = statInfo.mtime ? new Date(statInfo.mtime) : null;
-        const fsPath = this._buildMountPath(mount, nextSubPath || "/");
-
-        const info = await buildFileInfo({
-          fsPath,
-          name: entryName,
-          isDirectory: false,
-          size,
-          modified,
-          mimetype: getEffectiveMimeType(null, entryName),
-          mount,
-          storageType: mount.storage_type,
-          db,
-        });
-
-        results.push({
-          ...info,
-          mount_name: mount.name,
-        });
-      }
-    };
-
-    await walk(startDir, startSubPath);
-
-    return results;
-  }
-
   // ========== PROXY 能力：generateProxyUrl / supportsProxyMode / getProxyConfig ==========
 
   /**
    * 生成本地 /api/p 代理 URL
-   * @param {string} fsPath   挂载视图路径
-   * @param {Object} options  选项
-   * @param {Request} [options.request] 当前请求对象（用于构建绝对 URL）
-   * @param {boolean} [options.download=false] 是否为下载模式
-   * @param {string} [options.channel=\"web\"] 调用场景标记
+   * @param {string} subPath  挂载内子路径（subPath-only）
+   * @param {Object} ctx      选项（path/request/download/channel/...）
+   * @param {Request} [ctx.request] 当前请求对象（用于构建绝对 URL）
+   * @param {boolean} [ctx.download=false] 是否为下载模式
+   * @param {string} [ctx.channel=\"web\"] 调用场景标记
    * @returns {Promise<{url:string,type:string,channel:string}>}
    */
-  async generateProxyUrl(fsPath, options = {}) {
-    const { request, download = false, channel = "web" } = options;
+  async generateProxyUrl(subPath, ctx = {}) {
+    const { request, download = false, channel = "web" } = ctx;
+    const fsPath = ctx?.path;
     // 对 LOCAL 来说，代理 URL 始终是本地 /api/p + 挂载视图路径
     const proxyUrl = buildFullProxyUrl(request || null, fsPath, download);
     return {
@@ -1081,19 +1044,6 @@ export class LocalStorageDriver extends BaseDriver {
   _joinMountPath(basePath, name, isDirectory) {
     const normalizedBase = basePath.endsWith("/") ? basePath : basePath + "/";
     return `${normalizedBase}${name}${isDirectory ? "/" : ""}`;
-  }
-
-  /**
-   * 从挂载视图完整路径中提取子路径
-   * @param {string} fullPath 挂载视图完整路径
-   * @param {Object} mount    挂载对象
-   */
-  _extractSubPath(fullPath, mount) {
-    if (!fullPath) return "";
-    if (mount?.mount_path && fullPath.startsWith(mount.mount_path)) {
-      return fullPath.slice(mount.mount_path.length);
-    }
-    return fullPath.startsWith("/") ? fullPath : `/${fullPath}`;
   }
 
   /**

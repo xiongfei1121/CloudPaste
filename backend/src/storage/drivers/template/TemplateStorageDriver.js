@@ -72,20 +72,20 @@ export class TemplateStorageDriver extends BaseDriver {
 
   /**
    * 列出目录内容
-   * @param {string} path    挂载视图下的路径
-   * @param {Object} options 上下文选项（mount/subPath/db/userType 等）
+   * @param {string} subPath 挂载内子路径（subPath-only）
+   * @param {Object} ctx     上下文选项（mount/path/subPath/db/userType 等）
    */
-  async listDirectory(path, options = {}) {
+  async listDirectory(subPath, ctx = {}) {
     this._ensureInitialized();
     throw new Error("TemplateStorageDriver: 请在此实现 listDirectory 逻辑（参考 S3/WebDAV 驱动的目录列表实现）");
   }
 
   /**
    * 获取文件或目录信息
-   * @param {string} path    挂载视图下的路径
-   * @param {Object} options 上下文选项（mount/subPath/db/userType/userId/request 等）
+   * @param {string} subPath 挂载内子路径（subPath-only）
+   * @param {Object} ctx     上下文选项（mount/path/subPath/db/userType/userId/request 等）
    */
-  async getFileInfo(path, options = {}) {
+  async getFileInfo(subPath, ctx = {}) {
     this._ensureInitialized();
     throw new Error("TemplateStorageDriver: 请在此实现 getFileInfo 逻辑（参考 S3/WebDAV 驱动的文件信息实现）");
   }
@@ -95,11 +95,11 @@ export class TemplateStorageDriver extends BaseDriver {
    * Node 环境下优先使用 NodeReadable（fs.createReadStream 等）
    * Worker 环境下使用 Web ReadableStream
    *
-   * @param {string} path    挂载视图下的路径
-   * @param {Object} options 上下文选项（mount/subPath/db/request 等）
+   * @param {string} subPath 挂载内子路径（subPath-only）
+   * @param {Object} ctx     上下文选项（mount/path/subPath/db/request 等）
    * @returns {Promise<import('../../streaming/types.js').StorageStreamDescriptor>}
    */
-  async downloadFile(path, options = {}) {
+  async downloadFile(subPath, ctx = {}) {
     this._ensureInitialized();
     throw new Error("TemplateStorageDriver: 请在此实现 downloadFile 逻辑，返回 StorageStreamDescriptor（参考 LocalStorageDriver 的实现）");
   }
@@ -108,69 +108,58 @@ export class TemplateStorageDriver extends BaseDriver {
 
   /**
    * 统一上传入口（文件 / 流）
-   * @param {string} path          目标路径（挂载视图或 storage-first 视图）
+   * @param {string} subPath       挂载内子路径（subPath-only）
    * @param {any} fileOrStream     数据源（ReadableStream/Node Stream/Buffer/File/Blob/string 等）
-   * @param {Object} options       上下文选项（mount/subPath/db/filename/contentType/contentLength 等）
+   * @param {Object} ctx           上下文选项（mount/path/subPath/db/filename/contentType/contentLength 等）
    */
-  async uploadFile(path, fileOrStream, options = {}) {
+  async uploadFile(subPath, fileOrStream, ctx = {}) {
     this._ensureInitialized();
     throw new Error("TemplateStorageDriver: 请在此实现 uploadFile 逻辑（可区分流式上传与表单上传）");
   }
 
   /**
    * 创建目录
-   * @param {string} path    目录路径
-   * @param {Object} options 上下文选项（mount/subPath/db 等）
+   * @param {string} subPath 挂载内子路径（subPath-only）
+   * @param {Object} ctx     上下文选项（mount/path/subPath/db 等）
    */
-  async createDirectory(path, options = {}) {
+  async createDirectory(subPath, ctx = {}) {
     this._ensureInitialized();
     throw new Error("TemplateStorageDriver: 请在此实现 createDirectory 逻辑");
   }
 
   /**
    * 重命名文件或目录
-   * @param {string} oldPath 原路径
-   * @param {string} newPath 新路径
-   * @param {Object} options 上下文选项
+   * @param {string} oldSubPath 原子路径（subPath-only）
+   * @param {string} newSubPath 新子路径（subPath-only）
+   * @param {Object} ctx        上下文选项（oldPath/newPath/oldSubPath/newSubPath/...）
    */
-  async renameItem(oldPath, newPath, options = {}) {
+  async renameItem(oldSubPath, newSubPath, ctx = {}) {
     this._ensureInitialized();
     throw new Error("TemplateStorageDriver: 请在此实现 renameItem 逻辑");
   }
 
   /**
    * 批量删除文件/目录
-   * @param {Array<string>} paths 路径数组
-   * @param {Object} options      上下文选项
+   * @param {Array<string>} subPaths 子路径数组（subPath-only）
+   * @param {Object} ctx            上下文选项（paths/subPaths/mount/...）
    */
-  async batchRemoveItems(paths, options = {}) {
+  async batchRemoveItems(subPaths, ctx = {}) {
     this._ensureInitialized();
     throw new Error("TemplateStorageDriver: 请在此实现 batchRemoveItems 逻辑");
   }
 
   /**
    * 复制单个文件或目录
-   * @param {string} sourcePath 源路径
-   * @param {string} targetPath 目标路径
-   * @param {Object} options    上下文选项
+   * @param {string} sourceSubPath 源子路径（subPath-only）
+   * @param {string} targetSubPath 目标子路径（subPath-only）
+   * @param {Object} ctx            上下文选项（sourcePath/targetPath/sourceSubPath/targetSubPath/...）
    */
-  async copyItem(sourcePath, targetPath, options = {}) {
+  async copyItem(sourceSubPath, targetSubPath, ctx = {}) {
     this._ensureInitialized();
     throw new Error("TemplateStorageDriver: 请在此实现 copyItem 逻辑");
   }
 
   // ========== 可选方法：search / getStats ==========
-
-  /**
-   * 搜索文件和目录（可选实现）
-   * @param {string} query    搜索关键词
-   * @param {Object} options  选项（mount/searchPath/maxResults/db）
-   */
-  async search(query, options = {}) {
-    this._ensureInitialized();
-    // 默认返回空数组，驱动可根据后端能力实现搜索逻辑
-    return [];
-  }
 
   /**
    * 获取存储驱动统计信息（可选实现）
@@ -191,7 +180,7 @@ export class TemplateStorageDriver extends BaseDriver {
    * - 建议：对象存储用 HeadObject/Stat，WebDAV 用 PROPFIND/exists
    * - 返回 boolean；异常时可选择返回 false 或抛出 DriverError 交由上层处理
    */
-  async exists(path, options = {}) {
+  async exists(subPath, ctx = {}) {
     this._ensureInitialized();
     throw new Error("TemplateStorageDriver: 请实现 exists 逻辑（HEAD/STAT/PROPFIND 等）并返回 boolean");
   }
@@ -202,10 +191,10 @@ export class TemplateStorageDriver extends BaseDriver {
    * 生成下载直链（DIRECT_LINK 能力）
    * - 最小要求：返回 { url, type }，其中 type 为 "custom_host" 或 "native_direct"
    * - 其余字段（expiresIn/expiresAt 等）视需要扩展
-   * @param {string} path
-   * @param {Object} options
+   * @param {string} subPath 挂载内子路径（subPath-only）
+   * @param {Object} ctx     上下文选项（path/request/forceDownload/...）
    */
-  async generateDownloadUrl(path, options = {}) {
+  async generateDownloadUrl(subPath, ctx = {}) {
     this._ensureInitialized();
     throw new Error("TemplateStorageDriver: 如需支持直链能力，请在此实现 generateDownloadUrl，并返回 { url, type }");
   }
@@ -215,10 +204,10 @@ export class TemplateStorageDriver extends BaseDriver {
   /**
    * 生成代理 URL（PROXY 能力）
    * - 返回 { url, type: \"proxy\", channel? }
-   * @param {string} path
-   * @param {Object} options
+   * @param {string} subPath 挂载内子路径（subPath-only）
+   * @param {Object} ctx     上下文选项（path/request/download/channel/...）
    */
-  async generateProxyUrl(path, options = {}) {
+  async generateProxyUrl(subPath, ctx = {}) {
     this._ensureInitialized();
     throw new Error("TemplateStorageDriver: 如需支持代理能力，请在此实现 generateProxyUrl，并返回 { url, type: 'proxy' }");
   }
@@ -250,8 +239,8 @@ export class TemplateStorageDriver extends BaseDriver {
     throw new Error("TemplateStorageDriver: 请在此根据目标后端实现 listMultipartParts（用于恢复已上传分片）");
   }
 
-  async refreshMultipartUrls(subPath, uploadId, partNumbers, options = {}) {
+  async signMultipartParts(subPath, uploadId, partNumbers, options = {}) {
     this._ensureInitialized();
-    throw new Error("TemplateStorageDriver: 请在此根据目标后端实现 refreshMultipartUrls（刷新上传端点或会话信息）");
+    throw new Error("TemplateStorageDriver: 请在此根据目标后端实现 signMultipartParts（获取/刷新上传参数或会话信息）");
   }
 }

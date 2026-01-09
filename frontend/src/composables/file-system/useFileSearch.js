@@ -2,15 +2,18 @@
  * 文件搜索组合式函数
  */
 import { ref, computed, watch } from "vue";
+import { useLocalStorage } from "@vueuse/core";
 import { useAuthStore } from "@/stores/authStore.js";
 import { api } from "@/api";
 import { useI18n } from "vue-i18n";
 import { usePathPassword } from "@/composables/usePathPassword.js";
+import { createLogger } from "@/utils/logger.js";
 
 export function useFileSearch() {
   const authStore = useAuthStore();
   const { t } = useI18n();
   const { getPathToken, getAllPathTokens } = usePathPassword();
+  const log = createLogger("FileSearch");
 
   // API调用函数 - 使用统一API，自动根据认证信息处理用户类型
   const searchApi = computed(() => {
@@ -35,7 +38,7 @@ export function useFileSearch() {
   });
 
   // 搜索历史
-  const searchHistory = ref([]);
+  const searchHistory = useLocalStorage("fileSearchHistory", []);
   const maxHistoryItems = 10;
 
   // 计算属性
@@ -91,7 +94,7 @@ export function useFileSearch() {
         finalSearchParams.pathTokens = tokens;
       }
 
-      console.log("开始搜索文件:", searchTerm, finalSearchParams);
+      log.debug("开始搜索文件:", searchTerm, finalSearchParams);
 
       // 标记已执行搜索
       hasPerformedSearch.value = true;
@@ -132,7 +135,7 @@ export function useFileSearch() {
         // 添加到搜索历史
         addToSearchHistory(searchTerm);
 
-        console.log("搜索完成:", {
+        log.debug("搜索完成:", {
           query: searchTerm,
           results: searchResults.value.length,
           total: searchStats.value.total,
@@ -141,7 +144,7 @@ export function useFileSearch() {
         throw new Error(response.message || t("search.errors.searchFailed"));
       }
     } catch (err) {
-      console.error("搜索失败:", err);
+      log.error("搜索失败:", err);
       searchError.value = err.message || t("search.errors.searchFailed");
       searchResults.value = [];
       searchStats.value = { total: 0, hasMore: false, mountsSearched: 0, nextCursor: null };
@@ -177,7 +180,7 @@ export function useFileSearch() {
         paginationParams.pathTokens = tokens;
       }
 
-      console.log("加载更多搜索结果:", { cursor: searchStats.value.nextCursor });
+      log.debug("加载更多搜索结果:", { cursor: searchStats.value.nextCursor });
 
       const response = await searchApi.value(searchQuery.value, paginationParams);
 
@@ -194,7 +197,7 @@ export function useFileSearch() {
           nextCursor: searchData.nextCursor || null,
         };
 
-        console.log("加载更多结果完成:", {
+        log.debug("加载更多结果完成:", {
           newResults: searchData.results?.length || 0,
           totalResults: searchResults.value.length,
         });
@@ -202,7 +205,7 @@ export function useFileSearch() {
         throw new Error(response.message || t("search.errors.loadMoreFailed"));
       }
     } catch (err) {
-      console.error("加载更多结果失败:", err);
+      log.error("加载更多结果失败:", err);
       searchError.value = err.message || t("search.errors.loadMoreFailed");
     } finally {
       isSearching.value = false;
@@ -223,7 +226,7 @@ export function useFileSearch() {
     searchStats.value = { total: 0, hasMore: false, mountsSearched: 0, nextCursor: null };
     // 重置分页游标
     searchParams.value.cursor = null;
-    console.log("搜索结果已清除");
+    log.debug("搜索结果已清除");
   };
 
   /**
@@ -236,7 +239,7 @@ export function useFileSearch() {
       ...params,
       cursor: null, // 重置分页游标
     };
-    console.log("搜索参数已更新:", searchParams.value);
+    log.debug("搜索参数已更新:", searchParams.value);
   };
 
   /**
@@ -267,26 +270,13 @@ export function useFileSearch() {
 
     // 添加到开头
     searchHistory.value = [trimmedQuery, ...filteredHistory].slice(0, maxHistoryItems);
-
-    // 保存到本地存储
-    try {
-      localStorage.setItem("fileSearchHistory", JSON.stringify(searchHistory.value));
-    } catch (error) {
-      console.warn("保存搜索历史失败:", error);
-    }
   };
 
   /**
    * 加载搜索历史
    */
   const loadSearchHistory = () => {
-    try {
-      const saved = localStorage.getItem("fileSearchHistory");
-      if (saved) {
-        searchHistory.value = JSON.parse(saved);
-      }
-    } catch (error) {
-      console.warn("加载搜索历史失败:", error);
+    if (!Array.isArray(searchHistory.value)) {
       searchHistory.value = [];
     }
   };
@@ -296,11 +286,6 @@ export function useFileSearch() {
    */
   const clearSearchHistory = () => {
     searchHistory.value = [];
-    try {
-      localStorage.removeItem("fileSearchHistory");
-    } catch (error) {
-      console.warn("清除搜索历史失败:", error);
-    }
   };
 
   /**

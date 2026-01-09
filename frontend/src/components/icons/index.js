@@ -84,6 +84,7 @@ import IconWeiboSvg from '~icons/mdi/sina-weibo'
 import IconQqSvg from '~icons/mdi/qqchat'
 import IconTwitterSvg from '~icons/mdi/twitter'
 import IconTelegramSvg from '~icons/mdi/telegram'
+import IconDiscordSvg from '~icons/mdi/discord'
 import IconFacebookSvg from '~icons/mdi/facebook'
 import IconMdiChevronLeftSvg from '~icons/mdi/chevron-left'
 import IconMdiClockOutlineSvg from '~icons/mdi/clock-outline'
@@ -116,6 +117,7 @@ import IconSyncSvg from '~icons/heroicons-outline/arrow-path'
 import IconPlaySvg from '~icons/heroicons-outline/play'
 import IconBanSvg from '~icons/heroicons-outline/ban'
 import IconBellSvg from '~icons/heroicons-outline/bell'
+import IconMegaphoneSvg from '~icons/heroicons-outline/megaphone'
 import IconQueueListSvg from '~icons/heroicons-outline/queue-list'
 
 // 书签和导航图标
@@ -130,6 +132,8 @@ import IconGoogleDriveSvg from '~icons/mdi/google-drive'
 import IconStorageGitHubSvg from '~icons/mdi/github'
 import IconCloudSyncOutlineSvg from '~icons/mdi/cloud-sync-outline'
 import IconMdiFolderSvg from '~icons/mdi/folder'
+import HuggingFaceLogoSvg from './svg/HuggingFaceLogo.vue'
+import IconMirrorSvg from '~icons/mdi/mirror'
 
 // 压缩文件类型图标
 import IconFolderZipSvg from '~icons/mdi/folder-zip'
@@ -414,6 +418,7 @@ export const IconSync = createIcon(IconSyncSvg)
 export const IconPlay = createIcon(IconPlaySvg)
 export const IconBan = createIcon(IconBanSvg)
 export const IconBell = createIcon(IconBellSvg)
+export const IconMegaphone = createIcon(IconMegaphoneSvg)
 export const IconQueueList = createIcon(IconQueueListSvg)
 export const IconX = createIcon(IconCloseSvg)
 
@@ -430,6 +435,10 @@ export const IconStorageGoogleDrive = createIcon(IconGoogleDriveSvg)
 export const IconStorageGitHub = createIcon(IconStorageGitHubSvg)
 export const IconStorageWebDAV = createIcon(IconCloudSyncOutlineSvg)
 export const IconStorageLocal = createIcon(IconMdiFolderSvg)
+export const IconStorageTelegram = createIcon(IconTelegramSvg)
+export const IconStorageDiscord = createIcon(IconDiscordSvg)
+export const IconStorageHuggingFace = createIcon(HuggingFaceLogoSvg)
+export const IconStorageMirror = createIcon(IconMirrorSvg)
 
 // 压缩文件类型图标（MDI）
 export const IconFolderZip = createIcon(IconFolderZipSvg)
@@ -555,6 +564,7 @@ export default {
   IconPlay,
   IconBan,
   IconBell,
+  IconMegaphone,
   IconQueueList,
   IconX,
   IconBookmark,
@@ -567,6 +577,10 @@ export default {
   IconStorageGitHub,
   IconStorageWebDAV,
   IconStorageLocal,
+  IconStorageTelegram,
+  IconStorageDiscord,
+  IconStorageHuggingFace,
+  IconStorageMirror,
   IconFolderZip,
   IconFolderZipOutline,
   IconZipBox,

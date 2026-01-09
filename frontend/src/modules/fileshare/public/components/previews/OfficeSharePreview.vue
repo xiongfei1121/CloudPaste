@@ -1,12 +1,14 @@
 <template>
-  <div class="office-preview-wrapper flex-grow flex flex-col w-full">
+  <div ref="previewContainerRef" class="office-preview-wrapper flex-grow flex flex-col w-full">
     <OfficePreviewContainer
       :content-url="contentUrl"
       :filename="filename"
       :providers="providers"
-      :height-mode="'fixed'"
+      :height-mode="isFullscreen ? 'flex' : 'fixed'"
       :show-provider-selector="true"
       :show-footer="true"
+      :show-fullscreen="true"
+      :fullscreen-target="previewContainerRef"
       :download-url="downloadUrl"
       :error-message="localErrorMessage"
       @load="handleLoad"
@@ -43,10 +45,12 @@
 import { ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { OfficePreviewContainer } from "@/components/office";
+import { createLogger } from "@/utils/logger.js";
 
 const { t } = useI18n();
+const log = createLogger("OfficeSharePreview");
 
-const props = defineProps({
+defineProps({
   // DocumentApp providers 映射，例如 { native: 'native', microsoft: 'https://...', google: 'https://...' }
   providers: {
     type: Object,
@@ -65,9 +69,16 @@ const props = defineProps({
     type: String,
     default: "",
   },
+  darkMode: {
+    type: Boolean,
+    default: false,
+  },
 });
 
 const emit = defineEmits(["load", "error"]);
+
+const previewContainerRef = ref(null);
+const isFullscreen = ref(false);
 
 // 本地错误消息状态
 const localErrorMessage = ref("");
@@ -78,12 +89,12 @@ const handleLoad = () => {
 };
 
 const handleError = (err) => {
-  console.error("Office 预览错误:", err);
+  log.error("Office 预览错误:", err);
   localErrorMessage.value = err?.message || t("fileView.preview.office.error") || "预览加载失败";
   emit("error", err);
 };
 
-const handleProviderChange = (key) => {
+const handleProviderChange = () => {
   // 切换渠道时清除错误
   localErrorMessage.value = "";
 };

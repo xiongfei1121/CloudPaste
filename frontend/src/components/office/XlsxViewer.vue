@@ -14,7 +14,14 @@
 
     <!-- Excel 内容 -->
     <div v-else class="xlsx-content">
-      <VueOfficeExcel v-if="showViewer" :src="objectUrl" class="h-full w-full" @rendered="handleRendered" @error="handleError" />
+      <component
+        :is="OfficeExcelComponent"
+        v-if="showViewer && OfficeExcelComponent"
+        :src="objectUrl"
+        class="h-full w-full"
+        @rendered="handleRendered"
+        @error="handleError"
+      />
 
       <!-- 重挂载加载层 -->
       <div v-if="isRemounting" class="loading-overlay">
@@ -25,11 +32,12 @@
 </template>
 
 <script setup>
-import { onMounted, onUnmounted, ref, watch, nextTick } from "vue";
+import { onMounted, onUnmounted, ref, watch, nextTick, shallowRef } from "vue";
 import { fetchFileBinaryWithAuth } from "@/api/services/fileDownloadService.js";
-import VueOfficeExcel from "@vue-office/excel/lib/v3/index.js";
-import "@vue-office/excel/lib/v3/index.css";
 import LoadingIndicator from "@/components/common/LoadingIndicator.vue";
+import { createLogger } from "@/utils/logger.js";
+
+const log = createLogger("XlsxViewer");
 
 const props = defineProps({
   contentUrl: { type: String, required: true },
@@ -44,6 +52,28 @@ const objectUrl = ref("");
 const showViewer = ref(true);
 const isRemounting = ref(false);
 
+// 性能优化：@vue-office “用到才加载”
+const OfficeExcelComponent = shallowRef(null);
+let officeExcelLoadingPromise = null;
+const ensureOfficeExcelLoaded = async () => {
+  if (OfficeExcelComponent.value) return;
+  if (officeExcelLoadingPromise) return officeExcelLoadingPromise;
+
+  officeExcelLoadingPromise = (async () => {
+    const [mod] = await Promise.all([
+      import("@vue-office/excel/lib/v3/index.js"),
+      import("@vue-office/excel/lib/v3/index.css"),
+    ]);
+    OfficeExcelComponent.value = mod?.default || mod;
+  })();
+
+  try {
+    await officeExcelLoadingPromise;
+  } finally {
+    officeExcelLoadingPromise = null;
+  }
+};
+
 const revokeObjectUrl = () => {
   if (objectUrl.value) {
     URL.revokeObjectURL(objectUrl.value);
@@ -57,7 +87,7 @@ const handleRendered = () => {
 };
 
 const handleError = (err) => {
-  console.error("XLSX 本地预览失败:", err);
+  log.error("XLSX 本地预览失败:", err);
   errorMessage.value = "XLSX 本地预览失败";
   isRemounting.value = false;
   emit("error", err);
@@ -78,13 +108,16 @@ onMounted(async () => {
     loading.value = true;
     errorMessage.value = "";
 
-    const { buffer } = await fetchFileBinaryWithAuth(props.contentUrl);
+    const [{ buffer }] = await Promise.all([
+      fetchFileBinaryWithAuth(props.contentUrl),
+      ensureOfficeExcelLoaded(),
+    ]);
     const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
     objectUrl.value = URL.createObjectURL(blob);
 
     loading.value = false;
   } catch (err) {
-    console.error("XLSX 本地预览加载失败:", err);
+    log.error("XLSX 本地预览加载失败:", err);
     loading.value = false;
     errorMessage.value = err?.message || String(err);
     emit("error", err);

@@ -14,7 +14,14 @@
 
     <!-- PPT 内容 -->
     <div v-else class="pptx-content">
-      <VueOfficePptx v-if="showViewer" :src="objectUrl" class="h-full w-full" @rendered="handleRendered" @error="handleError" />
+      <component
+        :is="OfficePptxComponent"
+        v-if="showViewer && OfficePptxComponent"
+        :src="objectUrl"
+        class="h-full w-full"
+        @rendered="handleRendered"
+        @error="handleError"
+      />
 
       <!-- 重挂载加载层 -->
       <div v-if="isRemounting" class="loading-overlay">
@@ -25,10 +32,12 @@
 </template>
 
 <script setup>
-import { onMounted, onUnmounted, ref, watch, nextTick } from "vue";
+import { onMounted, onUnmounted, ref, watch, nextTick, shallowRef } from "vue";
 import { fetchFileBinaryWithAuth } from "@/api/services/fileDownloadService.js";
-import VueOfficePptx from "@vue-office/pptx/lib/v3/index.js";
 import LoadingIndicator from "@/components/common/LoadingIndicator.vue";
+import { createLogger } from "@/utils/logger.js";
+
+const log = createLogger("PptxViewer");
 
 const props = defineProps({
   contentUrl: { type: String, required: true },
@@ -43,6 +52,25 @@ const objectUrl = ref("");
 const showViewer = ref(true);
 const isRemounting = ref(false);
 
+// 性能优化：@vue-office “用到才加载”
+const OfficePptxComponent = shallowRef(null);
+let officePptxLoadingPromise = null;
+const ensureOfficePptxLoaded = async () => {
+  if (OfficePptxComponent.value) return;
+  if (officePptxLoadingPromise) return officePptxLoadingPromise;
+
+  officePptxLoadingPromise = (async () => {
+    const mod = await import("@vue-office/pptx/lib/v3/index.js");
+    OfficePptxComponent.value = mod?.default || mod;
+  })();
+
+  try {
+    await officePptxLoadingPromise;
+  } finally {
+    officePptxLoadingPromise = null;
+  }
+};
+
 const revokeObjectUrl = () => {
   if (objectUrl.value) {
     URL.revokeObjectURL(objectUrl.value);
@@ -56,7 +84,7 @@ const handleRendered = () => {
 };
 
 const handleError = (err) => {
-  console.error("PPTX 本地预览失败:", err);
+  log.error("PPTX 本地预览失败:", err);
   errorMessage.value = "PPTX 本地预览失败";
   isRemounting.value = false;
   emit("error", err);
@@ -77,13 +105,16 @@ onMounted(async () => {
     loading.value = true;
     errorMessage.value = "";
 
-    const { buffer } = await fetchFileBinaryWithAuth(props.contentUrl);
+    const [{ buffer }] = await Promise.all([
+      fetchFileBinaryWithAuth(props.contentUrl),
+      ensureOfficePptxLoaded(),
+    ]);
     const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.presentationml.presentation" });
     objectUrl.value = URL.createObjectURL(blob);
 
     loading.value = false;
   } catch (err) {
-    console.error("PPTX 本地预览加载失败:", err);
+    log.error("PPTX 本地预览加载失败:", err);
     loading.value = false;
     errorMessage.value = err?.message || String(err);
     emit("error", err);
@@ -122,4 +153,3 @@ onUnmounted(() => {
   background: rgba(255, 255, 255, 0.7);
 }
 </style>
-

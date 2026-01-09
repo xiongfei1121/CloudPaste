@@ -1,30 +1,11 @@
-import { ref, computed, onMounted } from "vue";
-import { api } from "@/api";
+import { computed, onMounted } from "vue";
+import { useStorageConfigsStore } from "@/stores/storageConfigsStore.js";
 
 /**
  * Admin 存储类型展示/样式 helper
  * - 统一从 /api/storage-types 加载元数据
  * - 基于 ui.icon / ui.badgeTheme / i18nKey 计算展示文案与 badge class
  */
-
-const storageTypesMeta = ref([]);
-const loading = ref(false);
-let loaded = false;
-
-async function ensureLoadedInternal() {
-  if (loaded || loading.value) return;
-  loading.value = true;
-  try {
-    const resp = await api.mount.getStorageTypes();
-    storageTypesMeta.value = Array.isArray(resp?.data) ? resp.data : Array.isArray(resp) ? resp : [];
-    loaded = true;
-  } catch (e) {
-    console.error("加载存储类型元数据失败(useStorageTypePresentation):", e);
-    storageTypesMeta.value = [];
-  } finally {
-    loading.value = false;
-  }
-}
 
 const BADGE_THEME_CLASS = {
   s3: {
@@ -51,39 +32,37 @@ const BADGE_THEME_CLASS = {
     light: "bg-gray-100 text-gray-800",
     dark: "bg-gray-700 text-gray-100",
   },
+  telegram: {
+    light: "bg-sky-100 text-sky-700",
+    dark: "bg-sky-800 text-sky-100",
+  },
+  discord: {
+    light: "bg-indigo-100 text-indigo-800",
+    dark: "bg-indigo-700 text-indigo-100",
+  },
+  huggingface: {
+    light: "bg-yellow-100 text-yellow-800",
+    dark: "bg-yellow-700 text-yellow-100",
+  },
+  mirror: {
+    light: "bg-purple-100 text-purple-800",
+    dark: "bg-purple-700 text-purple-100",
+  },
   default: {
     light: "bg-gray-100 text-gray-700",
     dark: "bg-gray-700 text-gray-300",
   },
 };
 
-function resolveBadgeTheme(type) {
-  const meta = storageTypesMeta.value.find((m) => m.type === type);
-  const theme = meta?.ui?.badgeTheme;
-  if (theme) return theme;
-
-  // 兼容旧的类型字符串
-  switch (type) {
-    case "S3":
-      return "s3";
-    case "WebDAV":
-    case "WEBDAV":
-      return "webdav";
-    case "ONEDRIVE":
-      return "onedrive";
-    case "GOOGLE_DRIVE":
-      return "googledrive";
-    case "LOCAL":
-      return "local";
-    default:
-      return "default";
-  }
-}
-
 export function useStorageTypePresentation() {
+  const storageConfigsStore = useStorageConfigsStore();
+
   onMounted(() => {
-    ensureLoadedInternal();
+    void storageConfigsStore.loadStorageTypes().catch(() => null);
   });
+
+  const storageTypesMeta = computed(() => storageConfigsStore.storageTypesMeta || []);
+  const loading = computed(() => !!storageConfigsStore.storageTypesLoading);
 
   const getTypeMeta = (type) => storageTypesMeta.value.find((m) => m.type === type) || null;
 
@@ -102,13 +81,13 @@ export function useStorageTypePresentation() {
   };
 
   const getBadgeClass = (type, darkModeValue = false) => {
-    const theme = resolveBadgeTheme(type);
+    const theme = getTypeMeta(type)?.ui?.badgeTheme || "default";
     const entry = BADGE_THEME_CLASS[theme] || BADGE_THEME_CLASS.default;
     return darkModeValue ? entry.dark : entry.light;
   };
 
   const ensureLoaded = async () => {
-    await ensureLoadedInternal();
+    await storageConfigsStore.loadStorageTypes().catch(() => null);
   };
 
   const storageTypeOptions = computed(() =>

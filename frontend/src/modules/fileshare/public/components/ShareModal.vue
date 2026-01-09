@@ -125,12 +125,14 @@
 </template>
 
 <script>
-import { ref, watch, nextTick, onUnmounted } from "vue";
+import { ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
+import { onKeyStroke } from "@vueuse/core";
 import { copyToClipboard } from "@/utils/clipboard";
 import { formatFileSize } from "@/utils/fileUtils";
 import { generateQRCode as createQRCodeImage } from "@/utils/qrcodeUtils.js";
 import { IconChevronDown, IconClose, IconCopy, IconDocumentText, IconFacebook, IconQQ, IconQrCode, IconShare, IconTelegram, IconTwitter, IconWeibo } from "@/components/icons";
+import { createLogger } from "@/utils/logger.js";
 
 // 社交平台配置常量
 const SOCIAL_PLATFORMS = [
@@ -203,6 +205,7 @@ export default {
   emits: ["close"],
   setup(props, { emit }) {
     const { t } = useI18n();
+    const log = createLogger("ShareModal");
 
     const showQRCode = ref(false);
     const qrCodeDataURL = ref("");
@@ -227,10 +230,9 @@ export default {
           setTimeout(() => {
             copySuccess.value = false;
           }, 2000);
-          console.log("Link copied successfully");
         }
       } catch (error) {
-        console.error("Failed to copy link:", error);
+        log.error("Failed to copy link:", error);
       }
     };
 
@@ -245,7 +247,7 @@ export default {
           });
         } catch (error) {
           if (error.name !== "AbortError") {
-            console.error("Native share failed:", error);
+            log.error("Native share failed:", error);
             // 回退到复制链接
             await copyLink();
           }
@@ -276,7 +278,7 @@ export default {
           qrCodeDataURL.value = await createQRCodeImage(window.location.href, { width: 128, margin: 1 });
           qrCodeError.value = false;
         } catch (error) {
-          console.error("Failed to generate QR code:", error);
+          log.error("Failed to generate QR code:", error);
           qrCodeError.value = true;
         }
       }
@@ -287,12 +289,12 @@ export default {
       emit("close");
     };
 
-    // 监听ESC键关闭
-    const handleKeydown = (event) => {
-      if (event.key === "Escape" && props.visible) {
+    // 监听 ESC 键关闭
+    onKeyStroke("Escape", () => {
+      if (props.visible) {
         closeModal();
       }
-    };
+    });
 
     // 点击外部关闭 - 更健壮的检测方式
     const handleClickOutside = (event) => {
@@ -306,17 +308,7 @@ export default {
     watch(
       () => props.visible,
       (newVal) => {
-        if (newVal) {
-          // 立即添加键盘事件监听器
-          document.addEventListener("keydown", handleKeydown);
-          // 使用nextTick确保DOM更新后再添加点击事件监听器
-          nextTick(() => {
-            document.addEventListener("click", handleClickOutside);
-          });
-        } else {
-          // 移除事件监听器并重置状态
-          document.removeEventListener("keydown", handleKeydown);
-          document.removeEventListener("click", handleClickOutside);
+        if (!newVal) {
           // 重置二维码相关状态
           showQRCode.value = false;
           qrCodeDataURL.value = "";
@@ -324,12 +316,6 @@ export default {
         }
       }
     );
-
-    // 组件卸载时清理事件监听器
-    onUnmounted(() => {
-      document.removeEventListener("keydown", handleKeydown);
-      document.removeEventListener("click", handleClickOutside);
-    });
 
     return {
       t,

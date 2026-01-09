@@ -2,6 +2,8 @@
  * useUppyPaste - Uppy粘贴上传Composable
  */
 import { watch } from 'vue';
+import { useEventListener } from '@vueuse/core';
+import { createLogger } from '@/utils/logger.js';
 
 /**
  * Uppy粘贴上传Composable
@@ -12,14 +14,17 @@ import { watch } from 'vue';
  * @returns {Object} 粘贴监听功能
  */
 export function useUppyPaste(options) {
+  const log = createLogger('UppyPaste');
   let pasteHandler = null;
+  let stopPasteListener = null;
 
   /**
    * 设置粘贴监听器
    */
   const setupPasteListener = () => {
-    if (pasteHandler) {
-      document.removeEventListener('paste', pasteHandler);
+    if (typeof stopPasteListener === 'function') {
+      stopPasteListener();
+      stopPasteListener = null;
     }
 
     pasteHandler = (event) => {
@@ -50,13 +55,13 @@ export function useUppyPaste(options) {
             options.onPaste?.(file);
             event.preventDefault();
           } catch (err) {
-            console.error('[useUppyPaste] 添加文件失败:', err);
+            log.error('[useUppyPaste] 添加文件失败:', err);
           }
         }
       }
     };
 
-    document.addEventListener('paste', pasteHandler);
+    stopPasteListener = useEventListener(document, 'paste', pasteHandler);
 
     // 保存清理函数到uppy实例
     if (options.uppy?.value) {
@@ -68,10 +73,11 @@ export function useUppyPaste(options) {
    * 清理粘贴监听器
    */
   const cleanupPasteListener = () => {
-    if (pasteHandler) {
-      document.removeEventListener('paste', pasteHandler);
-      pasteHandler = null;
+    if (typeof stopPasteListener === 'function') {
+      stopPasteListener();
+      stopPasteListener = null;
     }
+    pasteHandler = null;
   };
 
   // 监听uppy实例变化

@@ -20,11 +20,14 @@ export const DbTables = {
   FS_SEARCH_INDEX_STATE: "fs_search_index_state", // FS 搜索索引（状态表，派生数据）
   FS_SEARCH_INDEX_FTS: "fs_search_index_fts", // FS 搜索索引（FTS5 虚表，派生数据）
   FS_SEARCH_INDEX_DIRTY: "fs_search_index_dirty", // FS 搜索索引（dirty 队列表，派生数据）
+  METRICS_CACHE: "metrics_cache", // 通用指标缓存表（快照/用量/配额等派生数据）
   TASKS: "tasks", // 任务编排表
   SCHEMA_MIGRATIONS: "schema_migrations", // 迁移历史表（用于记录 schema 版本）
   SCHEDULED_JOBS: "scheduled_jobs", // 后台调度作业表
   SCHEDULED_JOB_RUNS: "scheduled_job_runs", // 后台调度作业运行日志表
   UPLOAD_SESSIONS: "upload_sessions", // 通用上传会话表（前端分片/断点续传）
+  UPLOAD_PARTS: "upload_parts", // 上传分片明细表（临时账本，一片一行）
+  VFS_NODES: "vfs_nodes", // 虚拟目录树索引表（长期目录树/条目）
 };
 
 // 默认的最大上传大小（MB）

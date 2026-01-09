@@ -1,14 +1,19 @@
 <script setup>
-import { ref, computed, onMounted, onUnmounted, nextTick } from "vue";
+import { ref, computed, onMounted, nextTick } from "vue";
+import { onClickOutside } from "@vueuse/core";
+import { useI18n } from "vue-i18n";
 // 导入统一的时间处理工具
 import { formatDateTime, formatRelativeTime, isExpired as isExpiredUtil } from "@/utils/timeUtils.js";
 // 导入统一的文件工具
 import { getRemainingViews as getRemainingViewsUtil } from "@/utils/fileUtils.js";
 // 导入创建者徽章统一逻辑
 import { useCreatorBadge } from "@/composables/admin-management/useCreatorBadge.js";
+import { useGlobalMessage } from "@/composables/core/useGlobalMessage.js";
 import { IconArrowUp, IconCalendar, IconCopy, IconDelete, IconError, IconEye, IconEyeOff, IconGlobeAlt, IconLink, IconLockClosed, IconMenu, IconQrCode, IconRename, IconUser } from "@/components/icons";
 
 const { getCreatorText } = useCreatorBadge();
+const { t } = useI18n();
+const { showError } = useGlobalMessage();
 
 /**
  * Paste 瀑布流卡片组件
@@ -112,7 +117,7 @@ const startEditing = () => {
  */
 const saveContent = () => {
   if (editingContent.value.trim() === "") {
-    alert("内容不能为空");
+    showError(t("markdown.messages.contentEmpty"));
     return;
   }
 
@@ -174,6 +179,7 @@ const handleTouchStart = (event) => {
 /**
  * 下拉菜单显示状态
  */
+const dropdownRef = ref(null);
 const showDropdown = ref(false);
 
 /**
@@ -198,30 +204,19 @@ const handleCardClick = () => {
   // 不执行任何操作，预览功能移到三点菜单
 };
 
-/**
- * 点击外部关闭下拉菜单
- */
-const handleClickOutside = (event) => {
-  // 如果点击的不是下拉菜单本身，则关闭菜单
-  if (showDropdown.value) {
-    closeDropdown();
-  }
-};
+// 点击外部关闭下拉菜单（VueUse 自动管理监听器与清理）
+onClickOutside(dropdownRef, () => {
+  if (!showDropdown.value) return;
+  closeDropdown();
+});
 
 // 生命周期：添加全局点击事件监听
 onMounted(() => {
-  document.addEventListener("click", handleClickOutside);
-
   // 检测是否为触摸设备（移动端）
   isTouchDevice.value =
     'ontouchstart' in window ||
     navigator.maxTouchPoints > 0 ||
     /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-});
-
-// 生命周期：移除全局点击事件监听
-onUnmounted(() => {
-  document.removeEventListener("click", handleClickOutside);
 });
 </script>
 
@@ -339,7 +334,7 @@ onUnmounted(() => {
           </div>
 
           <!-- 三点操作按钮 -->
-          <div class="relative">
+          <div class="relative" ref="dropdownRef">
             <button
               @click.stop="toggleDropdown"
               class="p-2 sm:p-1 -m-1 sm:m-0 rounded-md hover:bg-gray-100 dark:hover:bg-gray-700 active:bg-gray-200 dark:active:bg-gray-600 text-gray-500 dark:text-gray-400 transition-colors"

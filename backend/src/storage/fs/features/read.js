@@ -41,10 +41,33 @@ export async function listDirectory(fs, path, userIdOrInfo, userType, options = 
   const cacheEnabled = cacheTtl > 0 && !!mount?.id;
 
   const cacheSubPath = normalizePath(subPath || "/", true);
-  const inflightKey = `${mount?.id}:${cacheSubPath}:${refresh ? "1" : "0"}`;
+  // 目录分页支持
+  // - cursor：不透明字符串，由上游/驱动定义（例如 HF tree 的 cursor）
+  // - limit：每页数量（用于驱动按页返回，而不是一次性全量返回）
+  // - autoPaged：仅用于“/api/fs/list 这种 UI 列目录”，允许后端根据驱动能力自动切到分页（内部递归遍历等不要自动分页）
+  const autoPaged = options?.autoPaged === true;
+  const pagedOpt = options?.paged;
+  const pagedProvided = pagedOpt === true || pagedOpt === false;
+  let paged = pagedOpt === true;
+  const pageCursor = options?.cursor != null && String(options.cursor).trim() ? String(options.cursor).trim() : null;
+  const pageLimitRaw = options?.limit != null && options.limit !== "" ? Number(options.limit) : null;
+  const pageLimit = pageLimitRaw != null && Number.isFinite(pageLimitRaw) && pageLimitRaw > 0 ? Math.floor(pageLimitRaw) : null;
+  if (!pagedProvided && autoPaged) {
+    // 客户端没明确说 paged（未传），但这是 UI 列目录：允许自动决定
+    // - 如果传了 cursor/limit：必然是分页请求
+    // - 否则：看驱动有没有声明 PAGED_LIST 能力
+    if (pageCursor || pageLimit != null) {
+      paged = true;
+    } else if (typeof driver?.hasCapability === "function" && driver.hasCapability(CAPABILITIES.PAGED_LIST)) {
+      paged = true;
+    }
+  }
+  const isPagedRequest = paged || !!pageCursor || pageLimit != null;
+
+  const inflightKey = `${mount?.id}:${cacheSubPath}:${refresh ? "1" : "0"}:${isPagedRequest ? "paged" : "full"}:${paged ? "1" : "0"}:${pageCursor || ""}:${pageLimit || ""}`;
 
   // 1) 不 refresh：先读缓存
-  if (cacheEnabled && !refresh) {
+  if (cacheEnabled && !refresh && !isPagedRequest) {
     const cached = directoryCacheManager.get(mount.id, cacheSubPath);
     if (cached && Array.isArray(cached.items)) {
       if (cacheTrace) {
@@ -67,7 +90,7 @@ export async function listDirectory(fs, path, userIdOrInfo, userType, options = 
       path: dirPath,
       subPath: cacheSubPath,
       ttl: cacheTtl,
-      reason: refresh ? "refresh=true" : "cache_disabled",
+      reason: refresh ? "refresh=true" : isPagedRequest ? "paged_request" : "cache_disabled",
     });
   }
 
@@ -81,17 +104,22 @@ export async function listDirectory(fs, path, userIdOrInfo, userType, options = 
 
   const fetchPromise = (async () => {
     const startedAt = Date.now();
-    const result = await driver.listDirectory(dirPath, {
+    const result = await driver.listDirectory(cacheSubPath, {
+      path: dirPath,
       mount,
       subPath: cacheSubPath,
       db: fs.mountManager.db,
       ...options,
+      cursor: pageCursor,
+      limit: pageLimit,
+      userIdOrInfo,
+      userType,
       // refresh 只负责“本次请求绕过缓存”，不做“提前清缓存”
       refresh,
     });
 
     // 3) list 完成后更新缓存（refresh 也会写回缓存）
-    if (cacheEnabled) {
+    if (cacheEnabled && !isPagedRequest) {
       const items = Array.isArray(result?.items) ? result.items : [];
       if (items.length > 0) {
         directoryCacheManager.set(mount.id, cacheSubPath, cloneDirectoryResult(result), cacheTtl);
@@ -141,12 +169,13 @@ export async function getFileInfo(fs, path, userIdOrInfo, userType, request = nu
   }
 
   // 先获取基础文件信息（不关心其中是否包含任何 legacy 链接字段）
-  const baseInfo = await driver.getFileInfo(path, {
+  const baseInfo = await driver.getFileInfo(subPath, {
+    path,
     mount,
     subPath,
     db: fs.mountManager.db,
+    userIdOrInfo,
     userType,
-    userId: userIdOrInfo,
     request,
   });
 
@@ -166,7 +195,8 @@ export async function downloadFile(fs, path, fileName, request, userIdOrInfo, us
     });
   }
 
-  return await driver.downloadFile(path, {
+  return await driver.downloadFile(subPath, {
+    path,
     mount,
     subPath,
     db: fs.mountManager.db,
@@ -178,7 +208,8 @@ export async function downloadFile(fs, path, fileName, request, userIdOrInfo, us
 
 export async function exists(fs, path, userIdOrInfo, userType) {
   const { driver, mount, subPath } = await fs.mountManager.getDriverByPath(path, userIdOrInfo, userType);
-  return await driver.exists(path, {
+  return await driver.exists(subPath, {
+    path,
     mount,
     subPath,
     db: fs.mountManager.db,
